@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8">
+<style>
+/* Voir welcome.html : chaque couleur est declaree pour les deux apparences,
+ * sans quoi le mode sombre donne du texte blanc sur un fond clair fixe. */
+:root { color-scheme: light dark; }
+body { font: 13px -apple-system, BlinkMacSystemFont, sans-serif; color: #1d1d1f; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+p { margin: 0 0 10px; line-height: 1.5; }
+ol { margin: 0 0 10px; padding-left: 18px; line-height: 1.6; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  padding: 1px 5px; border-radius: 3px;
+  background: #ebebed; color: #1d1d1f; border: 1px solid #d8d8dc;
+}
+.note { color: #55555c; }
+@media (prefers-color-scheme: dark) {
+  body { color: #f5f5f7; }
+  code { background: #3a3a3e; color: #f5f5f7; border-color: #4a4a50; }
+  .note { color: #a9a9b0; }
+}
+</style>
+</head>
+<body>
+  <h2>C'est installé.</h2>
+  <ol>
+    <li>Lance (ou relance) OBS Studio.</li>
+    <li>Le dock <strong>Semirprod</strong> s'ouvre automatiquement.</li>
+    <li>Connecte le poste à ton compte depuis ce dock.</li>
+  </ol>
+  <p class="note">Si le dock n'apparaît pas : menu
+     <strong>Docks → Semirprod</strong>. Et s'il reste absent, le
+     journal d'OBS (<strong>Aide → Fichiers journaux</strong>) dit à la ligne
+     <code>Loaded Modules</code> si le module a été chargé.</p>
+  <p class="note">Pour désinstaller : supprime
+     <code>~/Library/Application Support/obs-studio/plugins/semirprod-studio.plugin</code>,
+     OBS fermé.</p>
+</body>
+</html>

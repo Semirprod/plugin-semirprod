@@ -1,0 +1,13 @@
+# build_plugin.bat is stored with CRLF line endings: cmd.exe handles a
+# script with labels badly in LF. Keep Windows build files byte for byte.
+*.bat -text
+*.iss -text
+
+# Shell scripts and YAML: LF everywhere, including a Windows checkout. A CR
+# glued to a shebang gives "bad interpreter: no such file or directory".
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Localized strings read by OBS.
+data/locale/*.ini text eol=lf

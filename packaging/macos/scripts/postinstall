@@ -1,0 +1,48 @@
+#!/bin/bash
+#
+# Verifie que ce qui vient d'etre pose est CHARGEABLE, et le dit dans
+# /var/log/install.log.
+#
+# Sans ca, le seul retour de l'installeur est « L'installation a reussi » —
+# vrai au sens des fichiers copies, et sans rapport avec la seule question qui
+# compte : est-ce qu'OBS va accepter ce module. Les deux causes de refus
+# (signature invalidee, quarantaine) sont silencieuses cote OBS : le module
+# n'apparait simplement pas dans « Loaded Modules ».
+set -u
+
+# $2 = chemin d'installation. Voir la note detaillee dans preinstall : $3 vaut
+# « / » pour un paquet en domaine utilisateur et mene au mauvais dossier.
+DEST="${2:-}"
+case "$DEST" in
+  ""|"/") DEST="$HOME" ;;
+esac
+
+BUNDLE="$DEST/Library/Application Support/obs-studio/plugins/semirprod-studio.plugin"
+
+if [ ! -d "$BUNDLE" ]; then
+  # Seul cas ou on fait echouer l'installation : il n'y a rien a charger.
+  echo "semirprod: bundle absent apres installation : $BUNDLE" >&2
+  exit 1
+fi
+
+# Quarantaine : un paquet notarise n'en pose pas, mais un paquet ouvert depuis
+# un telechargement non notarise peut en propager. `-r` parce que l'attribut
+# peut etre sur n'importe quel fichier du bundle, pas seulement a la racine.
+xattr -dr com.apple.quarantine "$BUNDLE" 2>/dev/null
+
+# Signature : on AVERTIT sans faire echouer, et c'est deliberé.
+#
+# Ce script tourne dans le bac a sable de PackageKit ; un `codesign --verify`
+# qui echoue ici n'est pas une preuve absolue que le module est casse. Surtout,
+# faire echouer l'installation a ce stade laisserait l'utilisateur sans plugin
+# ET sans piste, alors que le vrai diagnostic est a une ligne de la : le
+# journal d'OBS dit si le module a ete charge.
+if codesign --verify --strict "$BUNDLE" 2>/dev/null; then
+  echo "semirprod: installe, signature valide — $BUNDLE"
+else
+  echo "semirprod: ATTENTION, signature non verifiable apres installation." >&2
+  echo "semirprod: si OBS ne liste pas semirprod-studio dans « Loaded Modules »," >&2
+  echo "semirprod: reinstalle le paquet. Chemin : $BUNDLE" >&2
+fi
+
+exit 0

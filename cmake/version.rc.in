@@ -1,0 +1,45 @@
+// Ressource VERSIONINFO embarquée dans semirprod-studio.dll.
+// Permet à Windows d'afficher l'éditeur, la version et le copyright dans
+// les propriétés du fichier (clic droit -> Propriétés -> Détails) ainsi
+// qu'aux antivirus / SmartScreen de tagger correctement le binaire.
+//
+// Ce fichier est un template configuré par CMake (configure_file).
+// Variables substituées : @PROJECT_VERSION@ et ses composants.
+
+#include <winver.h>
+
+// Icone du module, visible dans l'explorateur et dans la fenetre de
+// proprietes. Chemin ABSOLU substitue par CMake : ce fichier est configure
+// dans le dossier de build, un chemin relatif y chercherait a cote du .rc
+// genere et pas dans le depot.
+IDI_ICON1 ICON "@SEMIRPROD_ICON_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_DLL
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 040C = French (France), 04B0 = Unicode
+        BLOCK "040c04b0"
+        BEGIN
+            VALUE "CompanyName",      "Semirprod"
+            VALUE "FileDescription",  "Semirprod pour OBS"
+            VALUE "FileVersion",      "@PROJECT_VERSION@.0"
+            VALUE "InternalName",     "semirprod-studio"
+            VALUE "LegalCopyright",   "\xA9 2026 Semirprod"
+            VALUE "OriginalFilename", "semirprod-studio.dll"
+            VALUE "ProductName",      "Semirprod pour OBS"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x040c, 0x04b0
+    END
+END

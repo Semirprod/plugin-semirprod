@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Semirprod pour OBS</title>
+    <organization>fr.semirprod</organization>
+
+    <!-- Domaine : le dossier de l'utilisateur courant, et LUI SEUL.
+
+         Ce n'est pas un choix de confort. Sur Apple Silicon, OBS ne cherche
+         ses plugins qu'a un seul endroit :
+           ~/Library/Application Support/obs-studio/plugins/<module>.plugin
+         Les emplacements systeme (/Library) sont derriere un `#ifndef
+         __aarch64__` dans le code d'OBS. Un paquet installe en
+         « localSystem » s'installerait donc sans erreur et resterait
+         invisible pour OBS — la panne la plus couteuse a diagnostiquer.
+
+         Effet de bord bienvenu : aucune elevation de privileges, donc aucun
+         mot de passe administrateur demande a l'utilisateur. -->
+    <domains enable_anywhere="false"
+             enable_currentUserHome="true"
+             enable_localSystem="false"/>
+
+    <!-- OBS 32.0 minimum : c'est le plancher impose par le SDK libobs contre
+         lequel le module est compile. En
+         dessous, libobs refuse le module au chargement. macOS 13 vient de
+         CMAKE_OSX_DEPLOYMENT_TARGET, aligne sur OBS lui-meme. -->
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="13.0"/>
+        </allowed-os-versions>
+    </volume-check>
+
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+
+    <!-- Logo Semirprod, en bas a gauche du panneau.
+         `scaling="none"` parce que l'image est deja generee a la bonne taille
+         par build_pkg.sh (sips depuis logo.png) : laisser l'installeur mettre
+         a l'echelle un PNG de 1080x1080 donne un rendu mou.
+         La variante darkAqua est la MEME image — le logo est lisible sur les
+         deux fonds — mais la declarer evite que macOS applique son propre
+         traitement au fichier clair. -->
+    <background file="background.png" alignment="bottomleft" scaling="none"/>
+    <background-darkAqua file="background.png" alignment="bottomleft" scaling="none"/>
+
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+    <choice id="default" title="Semirprod pour OBS">
+        <pkg-ref id="fr.semirprod.obs-plugin"/>
+    </choice>
+    <pkg-ref id="fr.semirprod.obs-plugin">semirprod-studio.pkg</pkg-ref>
+</installer-gui-script>

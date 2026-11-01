@@ -1,0 +1,33 @@
+#!/bin/bash
+#
+# Retire l'ancien bundle AVANT d'installer le nouveau.
+#
+# Un paquet remplace les fichiers qu'il apporte, mais ne supprime jamais ceux
+# qu'une version precedente avait poses et que la nouvelle n'a plus. Dans un
+# bundle .plugin ca compte : un fichier orphelin dans Contents/ invalide la
+# signature du bundle, et macOS refuse alors de charger le module — apres une
+# installation qui s'est pourtant deroulee sans erreur.
+set -u
+
+# --- Ou installe-t-on, exactement ---
+#
+# $2 et non $3. Les arguments d'un script de paquet sont :
+#   $1 chemin du paquet, $2 chemin d'INSTALLATION, $3 volume de destination.
+# Pour un paquet en domaine « currentUserHome », $2 vaut le dossier de
+# l'utilisateur (/Users/<nom>) tandis que $3 vaut « / ». Utiliser $3 construit
+# donc « //Library/Application Support/... », c'est-a-dire l'emplacement
+# SYSTEME : le script ne trouve rien, et le postinstall echoue en accusant une
+# installation qui s'etait pourtant bien passee. Erreur commise une fois ici,
+# corrigee sur la foi de /var/log/install.log.
+DEST="${2:-}"
+case "$DEST" in
+  ""|"/") DEST="$HOME" ;;
+esac
+
+BUNDLE="$DEST/Library/Application Support/obs-studio/plugins/semirprod-studio.plugin"
+
+if [ -d "$BUNDLE" ]; then
+  rm -rf "$BUNDLE"
+fi
+
+exit 0

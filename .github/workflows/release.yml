@@ -1,0 +1,578 @@
+# =============================================================================
+# Build, sign and draft-publish Semirprod for OBS.
+#
+# Pull requests and pushes to main: build check on the three platforms, no
+# secrets, no signing, nothing published. A fork runs exactly this.
+#
+# Tag v<version> pushed to Semirprod/plugin-semirprod: the same builds, then
+#   - macOS: Developer ID signature, notarization, stapling (job "macos-signed");
+#   - a DRAFT GitHub Release with every binary, the source archive and
+#     SHA256SUMS.txt (job "publish");
+#   - each installer uploaded as a DRAFT to Semirprod. Nothing reaches users
+#     until a draft is promoted by hand.
+# Both jobs are bound to the GitHub environment "release": they wait for an
+# approval, and only they can read its secrets. That environment, and every
+# secret below (signing material and SEMIRPROD_RELEASE_UPLOAD_TOKEN), lives in
+# THIS public repository (Semirprod/plugin-semirprod), not in any private
+# Semirprod repository: the workflow that reads them is this one.
+#
+# Runner images are pinned on purpose:
+#   windows-2022  Visual Studio 2022 and Windows SDK 10.0.22621, the toolchain of
+#                 build_plugin.bat and of the OBS 32.0 preset. windows-latest
+#                 ships Visual Studio 2026 only.
+#   macos-15      Apple Silicon host; the plugin is built universal
+#                 (arm64 + x86_64) by build_plugin_macos.sh.
+#   ubuntu-24.04  The plugin must use the Qt of the OBS that loads it: Ubuntu
+#                 24.04 LTS (Qt 6.4.2) is the Linux target.
+#
+# Security rules for this file:
+#   - every action is pinned by full commit SHA; no third-party action;
+#   - secrets only reach steps through env, never through ${{ }} inside a
+#     script, and are never echoed (curl reads the token from a 0600 file);
+#   - ONE exception to "never on a command line": macOS `security` takes the
+#     temporary keychain password (-p / -k) and the .p12 passwords (-P) only
+#     as arguments, with no stdin or file option. They are visible in the
+#     process list of the ephemeral, single-job GitHub-hosted runner for the
+#     lifetime of those calls, and nowhere else;
+#   - scripts run with `set -euo pipefail`;
+#   - the temporary signing keychain and every decoded key file are deleted
+#     at the end of the job, even when it fails.
+# =============================================================================
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SEMIRPROD_RELEASE_DRAFTS_URL: ${{ vars.SEMIRPROD_RELEASE_DRAFTS_URL || 'https://admin.semirprod.fr/api/admin/plugin/release-drafts' }}
+
+jobs:
+  meta:
+    name: Version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read version, check it against the tag
+        id: version
+        run: |
+          set -euo pipefail
+          # Single source of truth: project(VERSION) in CMakeLists.txt.
+          version="$(sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | sed -n 1p)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::unreadable version in CMakeLists.txt: '$version'"
+            exit 1
+          fi
+          release=false
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match CMakeLists.txt version $version"
+              exit 1
+            fi
+            # Signing and publishing only exist in the official repository. A
+            # tag pushed in a fork builds, and stops there.
+            if [ "$GITHUB_REPOSITORY" = "Semirprod/plugin-semirprod" ]; then
+              release=true
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "version $version, release=$release"
+
+  windows:
+    name: Windows x64
+    needs: meta
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      # build_plugin.bat is stored with CRLF line endings (cmd.exe needs them
+      # for its labels) and the shell scripts with LF: check out bytes as-is.
+      - name: Keep line endings as committed
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare OBS SDK (libobs + obs-frontend-api, OBS 32.0)
+        run: bash .github/scripts/prepare-obs-sdk.sh
+
+      - name: Point the build at the Qt shipped with OBS 32.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $qt6 = $env:OBS_QT6_DEPS
+          $cfg = Join-Path $qt6 'lib\cmake\Qt6\Qt6ConfigVersionImpl.cmake'
+          if (-not (Test-Path $cfg)) { $cfg = Join-Path $qt6 'lib\cmake\Qt6\Qt6ConfigVersion.cmake' }
+          $m = Select-String -Path $cfg -Pattern 'set\(PACKAGE_VERSION "([0-9.]+)"\)' | Select-Object -First 1
+          if (-not $m) { throw "Qt version unreadable in $cfg" }
+          $qtVer = $m.Matches[0].Groups[1].Value
+          # build_plugin.bat reads the Qt version from the folder layout of
+          # QT_DIR (...\<version>\msvc2022_64) and refuses anything but the
+          # floor (6.8). Its guard runs on the real obs-deps version.
+          $qtDir = Join-Path $env:RUNNER_TEMP "qt\$qtVer\msvc2022_64"
+          New-Item -ItemType Directory -Force -Path (Split-Path $qtDir) | Out-Null
+          New-Item -ItemType Junction -Path $qtDir -Target $qt6 | Out-Null
+          # installer.iss takes the Qt TLS backend from deps\qt6\plugins\tls.
+          New-Item -ItemType Directory -Force -Path deps | Out-Null
+          New-Item -ItemType Junction -Path deps\qt6 -Target $qt6 | Out-Null
+          "QT_DIR=$qtDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Qt $qtVer from obs-deps"
+
+      - name: Build plugin, zip and installer
+        shell: pwsh
+        env:
+          SEMIRPROD_SKIP_OBS_COPY: '1'
+          SEMIRPROD_DEV_BUILD_FLAG: '0'
+        run: |
+          # The script ends on `pause`: stdin from NUL lets it return.
+          cmd /d /c "build_plugin.bat < NUL"
+          if ($LASTEXITCODE -ne 0) { throw "build_plugin.bat failed (exit $LASTEXITCODE)" }
+
+      # -----------------------------------------------------------------------
+      # OPTIONAL, NOT ENABLED: Authenticode.
+      # Needs a code signing certificate. It must sign the DLL BEFORE the
+      # installer is built (signing the installer does not sign what it
+      # contains), then the installer itself:
+      #   1. build_plugin.bat without Inno Setup on PATH (DLL + zip only);
+      #   2. signtool sign /fd sha256 /tr <RFC 3161 timestamp URL> /td sha256
+      #        build\RelWithDebInfo\semirprod-studio.dll
+      #   3. ISCC /DMyAppVersion=%VERSION% packaging\windows\installer.iss
+      #   4. signtool sign ... semirprod-plugin-installer-%VERSION%.exe
+      # Bind that job to the "release" environment like macos-signed, and
+      # keep it off pull requests.
+      # -----------------------------------------------------------------------
+      - name: Authenticode signature (not enabled)
+        if: ${{ false }}
+        shell: pwsh
+        run: throw "Authenticode signing is not configured"
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @("semirprod-plugin-installer-$env:VERSION.exe", "obs-semirprod-plugin-v$env:VERSION.zip")
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) { throw "expected artifact missing: $f" }
+            Copy-Item $f out\
+          }
+          Get-FileHash out\* -Algorithm SHA256 | Format-Table -AutoSize
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    name: Linux x86_64
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare OBS SDK (libobs + obs-frontend-api, OBS 32.0)
+        run: bash .github/scripts/prepare-obs-sdk.sh --install-deps
+
+      - name: Build plugin (public edition)
+        env:
+          OBS_USER_PLUGINS: ${{ runner.temp }}/obs-user-plugins
+        run: bash build_plugin.sh --edition public
+
+      - name: Check the module and collect the archive
+        run: |
+          set -euo pipefail
+          so=dist-linux/semirprod-studio/bin/64bit/semirprod-studio.so
+          # libobs rejects a module without these exports, with no detail.
+          nm -D --defined-only "$so" | grep -qE ' obs_module_load$' \
+            || { echo "::error::obs_module_load is not exported"; exit 1; }
+          tarball="obs-semirprod-plugin-v$VERSION-linux-x86_64.tar.gz"
+          test -f "$tarball" || { echo "::error::expected artifact missing: $tarball"; exit 1; }
+          mkdir -p out && cp "$tarball" out/
+          sha256sum out/*
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Pull requests, main, forks: same build, ad-hoc signature, unsigned .pkg.
+  # It needs no secret and cannot fail for lack of one.
+  macos:
+    name: macOS universal (unsigned)
+    needs: meta
+    if: needs.meta.outputs.release != 'true'
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare OBS SDK (libobs + obs-frontend-api, OBS 32.0)
+        run: bash .github/scripts/prepare-obs-sdk.sh
+
+      - name: Build plugin and package (ad-hoc signature)
+        env:
+          OBS_USER_PLUGINS: ${{ runner.temp }}/obs-user-plugins
+          CODESIGN_IDENTITY: '-'
+        run: bash build_plugin_macos.sh
+
+      - name: Collect artifact
+        run: |
+          set -euo pipefail
+          pkg="dist-macos/semirprod-plugin-$VERSION.pkg"
+          test -f "$pkg" || { echo "::error::expected artifact missing: $pkg"; exit 1; }
+          mkdir -p out && cp "$pkg" out/
+          shasum -a 256 out/*
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-unsigned
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Official tags only. Waits for approval on the "release" environment.
+  macos-signed:
+    name: macOS universal (signed, notarized)
+    needs: meta
+    if: needs.meta.outputs.release == 'true'
+    runs-on: macos-15
+    timeout-minutes: 150
+    environment: release
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # An official release is never shipped unsigned: a missing secret stops
+      # here, before an hour of build.
+      - name: Check signing secrets
+        env:
+          MACOS_CERT_APPLICATION_P12: ${{ secrets.MACOS_CERT_APPLICATION_P12 }}
+          MACOS_CERT_APPLICATION_PASSWORD: ${{ secrets.MACOS_CERT_APPLICATION_PASSWORD }}
+          MACOS_CERT_INSTALLER_P12: ${{ secrets.MACOS_CERT_INSTALLER_P12 }}
+          MACOS_CERT_INSTALLER_PASSWORD: ${{ secrets.MACOS_CERT_INSTALLER_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in MACOS_CERT_APPLICATION_P12 MACOS_CERT_APPLICATION_PASSWORD \
+                      MACOS_CERT_INSTALLER_P12 MACOS_CERT_INSTALLER_PASSWORD \
+                      MACOS_KEYCHAIN_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID \
+                      APPLE_API_ISSUER_ID APPLE_TEAM_ID; do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::missing secrets in environment 'release': ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Import certificates into a temporary keychain
+        env:
+          MACOS_CERT_APPLICATION_P12: ${{ secrets.MACOS_CERT_APPLICATION_P12 }}
+          MACOS_CERT_APPLICATION_PASSWORD: ${{ secrets.MACOS_CERT_APPLICATION_PASSWORD }}
+          MACOS_CERT_INSTALLER_P12: ${{ secrets.MACOS_CERT_INSTALLER_P12 }}
+          MACOS_CERT_INSTALLER_PASSWORD: ${{ secrets.MACOS_CERT_INSTALLER_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          kc="$RUNNER_TEMP/semirprod-signing.keychain-db"
+          app_p12="$RUNNER_TEMP/app-cert.p12"
+          inst_p12="$RUNNER_TEMP/installer-cert.p12"
+          trap 'rm -f "$app_p12" "$inst_p12" "$RUNNER_TEMP/DeveloperIDG2CA.cer"' EXIT
+
+          printf '%s' "$MACOS_CERT_APPLICATION_P12" | base64 --decode > "$app_p12"
+          printf '%s' "$MACOS_CERT_INSTALLER_P12" | base64 --decode > "$inst_p12"
+
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$kc"
+          tools=(-T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/productsign -T /usr/bin/pkgbuild)
+          security import "$app_p12" -k "$kc" -f pkcs12 -P "$MACOS_CERT_APPLICATION_PASSWORD" "${tools[@]}" >/dev/null
+          security import "$inst_p12" -k "$kc" -f pkcs12 -P "$MACOS_CERT_INSTALLER_PASSWORD" "${tools[@]}" >/dev/null
+          # Intermediate CA of Developer ID certificates, in case the .p12
+          # carries the leaf only: without it the identities are not "valid".
+          curl -fsSL --proto =https -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$kc" >/dev/null 2>&1 || true
+          # No UI prompt for codesign/productbuild on the private keys.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$MACOS_KEYCHAIN_PASSWORD" "$kc" >/dev/null
+
+          # Temporary keychain first in the search list: the build scripts
+          # look identities up there.
+          existing=()
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"; line="${line%\"}"; line="${line#\"}"
+            [ -n "$line" ] && existing+=("$line")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$kc" "${existing[@]}"
+
+          app_id="$(security find-identity -v -p codesigning "$kc" \
+            | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)"
+          inst_id="$(security find-identity -v "$kc" \
+            | sed -n 's/.*"\(Developer ID Installer: .*\)"$/\1/p' | head -1)"
+          [ -n "$app_id" ] || { echo "::error::no valid 'Developer ID Application' identity in MACOS_CERT_APPLICATION_P12"; exit 1; }
+          [ -n "$inst_id" ] || { echo "::error::no valid 'Developer ID Installer' identity in MACOS_CERT_INSTALLER_P12"; exit 1; }
+          # Certificate names can carry a person's name: keep them out of the
+          # public log, every later line included.
+          echo "::add-mask::$app_id"
+          echo "::add-mask::$inst_id"
+          for id in "$app_id" "$inst_id"; do
+            case "$id" in
+              *"($APPLE_TEAM_ID)") ;;
+              *) echo "::error::a signing certificate does not belong to APPLE_TEAM_ID"; exit 1 ;;
+            esac
+          done
+          {
+            echo "CODESIGN_IDENTITY=$app_id"
+            echo "INSTALLER_IDENTITY=$inst_id"
+          } >> "$GITHUB_ENV"
+          echo "signing identities imported"
+
+      - name: Prepare OBS SDK (libobs + obs-frontend-api, OBS 32.0)
+        run: bash .github/scripts/prepare-obs-sdk.sh
+
+      # CODESIGN_IDENTITY: the bundle and its TLS backend are signed with
+      # hardened runtime and a secure timestamp (cmake/macos/embed_tls_backend.cmake).
+      # INSTALLER_IDENTITY: productbuild signs the .pkg (packaging/macos/build_pkg.sh).
+      # Notarization runs in the next step, not in build_pkg.sh.
+      - name: Build, sign plugin and package
+        env:
+          OBS_USER_PLUGINS: ${{ runner.temp }}/obs-user-plugins
+        run: bash build_plugin_macos.sh
+
+      - name: Verify code signature
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          bundle=build-macos-dist/semirprod-studio.plugin
+          pkg="dist-macos/semirprod-plugin-$VERSION.pkg"
+          codesign --verify --deep --strict --verbose=2 "$bundle"
+          info="$(codesign -dvvv "$bundle" 2>&1)"
+          grep -qE '^CodeDirectory .*flags=.*runtime' <<<"$info" \
+            || { echo "::error::hardened runtime missing on the bundle"; exit 1; }
+          grep -q '^Timestamp=' <<<"$info" \
+            || { echo "::error::secure timestamp missing on the bundle"; exit 1; }
+          [ "$(sed -n 's/^TeamIdentifier=//p' <<<"$info")" = "$APPLE_TEAM_ID" ] \
+            || { echo "::error::bundle not signed by APPLE_TEAM_ID"; exit 1; }
+          pkgutil --check-signature "$pkg" \
+            | grep -q 'signed by a developer certificate issued by Apple for distribution' \
+            || { echo "::error::package not signed with a Developer ID Installer certificate"; exit 1; }
+          echo "bundle and package signatures OK"
+
+      - name: Notarize and staple
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          pkg="dist-macos/semirprod-plugin-$VERSION.pkg"
+          key="$RUNNER_TEMP/notary-key.p8"
+          result="$RUNNER_TEMP/notary-result.json"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key"
+          auth=(--key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID")
+
+          xcrun notarytool submit "$pkg" "${auth[@]}" --wait --timeout 60m \
+            --output-format json > "$result" || true
+          status="$(plutil -extract status raw -o - "$result" 2>/dev/null || echo unknown)"
+          sub_id="$(plutil -extract id raw -o - "$result" 2>/dev/null || true)"
+          echo "notarization: $status (submission ${sub_id:-none})"
+          if [ "$status" != "Accepted" ]; then
+            # The log lists, file by file, what Apple refused.
+            [ -n "$sub_id" ] && xcrun notarytool log "$sub_id" "${auth[@]}" || true
+            echo "::error::notarization $status"
+            exit 1
+          fi
+          # Stapling puts the ticket in the file: installation then works
+          # offline too.
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+
+      - name: Gatekeeper verdict
+        run: |
+          set -euo pipefail
+          pkg="dist-macos/semirprod-plugin-$VERSION.pkg"
+          spctl --assess --type install --verbose=2 "$pkg"
+          pkgutil --check-signature "$pkg" | grep -q 'Notarization: trusted by the Apple notary service' \
+            || { echo "::error::package not recognized as notarized"; exit 1; }
+          mkdir -p out && cp "$pkg" out/
+          shasum -a 256 out/*
+
+      - name: Delete temporary keychain and key files
+        if: always()
+        run: |
+          kc="$RUNNER_TEMP/semirprod-signing.keychain-db"
+          if [ -f "$kc" ]; then security delete-keychain "$kc" || true; fi
+          rm -f "$RUNNER_TEMP/app-cert.p12" "$RUNNER_TEMP/installer-cert.p12" \
+                "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Official tags only. Waits for approval on the "release" environment.
+  publish:
+    name: Draft releases
+    needs: [meta, windows, linux, macos-signed]
+    if: needs.meta.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check artifacts, add source archive and checksums
+        run: |
+          set -euo pipefail
+          expected=(
+            "semirprod-plugin-installer-$VERSION.exe"
+            "obs-semirprod-plugin-v$VERSION.zip"
+            "semirprod-plugin-$VERSION.pkg"
+            "obs-semirprod-plugin-v$VERSION-linux-x86_64.tar.gz"
+          )
+          for f in "${expected[@]}"; do
+            test -f "dist/$f" || { echo "::error::missing artifact: $f"; exit 1; }
+          done
+          if [ "$(find dist -maxdepth 1 -type f | wc -l)" -ne "${#expected[@]}" ]; then
+            echo "::error::unexpected files in the build output"; ls -la dist; exit 1
+          fi
+          # Complete corresponding source (GPL): this repository at the tag.
+          git archive --format=tar.gz --prefix="obs-semirprod-plugin-v$VERSION-source/" \
+            -o "dist/obs-semirprod-plugin-v$VERSION-source.tar.gz" "$GITHUB_SHA"
+          (cd dist && sha256sum -- * > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Create or update the GitHub draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Re-run of the job: only a draft may have its files replaced.
+            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::release $TAG is already published; its files are not replaced"
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --draft --verify-tag \
+              --title "Semirprod for OBS $VERSION" \
+              --notes "Built from $TAG ($GITHUB_SHA). Verify downloads against SHA256SUMS.txt. The source archive is the complete corresponding source of these binaries (GPL-2.0-or-later)."
+          fi
+
+      - name: Upload drafts to Semirprod
+        env:
+          SEMIRPROD_RELEASE_UPLOAD_TOKEN: ${{ secrets.SEMIRPROD_RELEASE_UPLOAD_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SEMIRPROD_RELEASE_UPLOAD_TOKEN:-}" ]; then
+            echo "::error::SEMIRPROD_RELEASE_UPLOAD_TOKEN missing in environment 'release'"
+            exit 1
+          fi
+          umask 077
+          hdr="$RUNNER_TEMP/semirprod-auth-header"
+          resp="$RUNNER_TEMP/semirprod-response"
+          trap 'rm -f "$hdr" "$resp"' EXIT
+          # The token goes through a 0600 file, not the command line.
+          printf 'Authorization: Bearer %s\n' "$SEMIRPROD_RELEASE_UPLOAD_TOKEN" > "$hdr"
+
+          upload() {
+            local platform="$1" file="$2" code sum
+            if [ ! -f "$file" ]; then
+              echo "::error::$platform: $file not found"
+              return 1
+            fi
+            # The server recomputes the SHA-256 of the received file and
+            # rejects the draft (HTTP 400) if it differs from this one. curl
+            # sends a Content-Length for -F uploads, which the endpoint requires.
+            if command -v sha256sum >/dev/null; then
+              sum="$(sha256sum -- "$file" | cut -d' ' -f1)"
+            else
+              sum="$(shasum -a 256 -- "$file" | cut -d' ' -f1)"
+            fi
+            sum="$(printf '%s' "$sum" | tr 'A-F' 'a-f')"
+            code="$(curl -sS --proto =https --tlsv1.2 --max-time 900 \
+              -o "$resp" -w '%{http_code}' -H @"$hdr" \
+              -F "version=$VERSION" -F "platform=$platform" -F "sha256=$sum" \
+              -F "file=@$file" \
+              "$SEMIRPROD_RELEASE_DRAFTS_URL")" || code=000
+            if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
+              echo "$platform: draft stored ($(basename "$file"), sha256 $sum, HTTP $code)"
+            else
+              echo "::error::$platform: draft upload failed (HTTP $code)"
+              # Status code only: this log is public, and an error body can echo
+              # request details. The body stays in the runner temp dir, deleted on exit.
+              return 1
+            fi
+          }
+          rc=0
+          upload windows "dist/semirprod-plugin-installer-$VERSION.exe" || rc=1
+          upload macos "dist/semirprod-plugin-$VERSION.pkg" || rc=1
+          upload linux "dist/obs-semirprod-plugin-v$VERSION-linux-x86_64.tar.gz" || rc=1
+          exit "$rc"

@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =========================================================================
+   Design tokens — copied verbatim from Semirprod-site
+   (apps/dashboard/app/globals.css, shadcn New York / Neutral base) so the
+   plugin UI is the same product, not a re-skin. Keep in sync with the site.
+   ========================================================================= */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+
+    /* Status hues — not part of the site's core palette; used by the plugin's
+       live/source/entitlement pills. Green / amber tuned to the dark UI. */
+    --success: 152 60% 45%;
+    --warning: 30 80% 55%;
+  }
+
+  .dark {
+    --background: 0 0% 0%;
+    --foreground: 0 0% 98%;
+    /* Le site est 100 % noir : les surfaces de contenu ne prennent PAS le 8 %
+       du preset shadcn (qui donnait des blocs gris empilés sur du noir dans le
+       dock OBS). Seul --popover garde une élévation, sinon un menu déroulant
+       serait illisible par-dessus le contenu. */
+    --card: 0 0% 0%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 8%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 13%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 13%;
+    --muted-foreground: 0 0% 55%;
+    --accent: 0 0% 13%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 15%;
+    --input: 0 0% 15%;
+    --ring: 0 0% 80%;
+
+    --success: 152 55% 48%;
+    --warning: 30 85% 58%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+
+  /* Dark, thin scrollbar. Without this the CEF view shows Chromium's bright
+     default scrollbar (white on our black theme). The thumb only appears when
+     content actually overflows, so short screens stay scrollbar-free. */
+  html {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+    /* Place de la barre TOUJOURS réservée : sans ça, passer d'un onglet long
+       (Direct, Réglages) à un court (Collections) faisait disparaître la barre
+       et glisser tout le contenu de sa largeur vers la droite. */
+    scrollbar-gutter: stable;
+  }
+  /* Une fenêtre ouverte (Radix Dialog) bloque le défilement et compense la
+     barre disparue par une marge à droite. La place étant déjà réservée
+     ci-dessus, cette marge pousserait le contenu à gauche : on l'annule. */
+  html body[data-scroll-locked] {
+    margin-right: 0 !important;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground));
+  }
+}

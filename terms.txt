@@ -1,0 +1,52 @@
+﻿Semirprod pour OBS
+Copyright (C) 2024-2026 Semirprod
+
+Ce programme est un logiciel libre : vous pouvez le redistribuer et/ou le
+modifier selon les termes de la GNU General Public License telle que publiée
+par la Free Software Foundation, soit la version 2 de la licence, soit (à votre
+choix) toute version ultérieure.
+
+Ce programme est distribué dans l'espoir qu'il sera utile, mais SANS AUCUNE
+GARANTIE, sans même la garantie implicite de QUALITÉ MARCHANDE ou d'ADÉQUATION
+À UN USAGE PARTICULIER. Consultez la GNU General Public License pour plus de
+détails. Le texte complet de la licence est installé avec le plugin (fichier
+LICENSE).
+
+Code source de cette version :
+https://github.com/Semirprod/plugin-semirprod
+
+Le plugin se connecte au service en ligne Semirprod. L'utilisation de ce service
+(compte, flux, abonnement) est régie par ses conditions d'utilisation :
+https://semirprod.fr/terms-of-service
+Ces conditions s'appliquent au service, pas au logiciel : elles ne restreignent
+aucun des droits que la licence ci-dessus vous accorde.
+
+Le nom et le logo Semirprod ne sont pas couverts par cette licence. Une version
+modifiée ne doit pas se présenter comme publiée par Semirprod.
+
+----------------------------------------------------------------------------
+
+Semirprod for OBS
+Copyright (C) 2024-2026 Semirprod
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; either version 2 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details. The
+full license text is installed with the plugin (LICENSE file).
+
+Source code of this version:
+https://github.com/Semirprod/plugin-semirprod
+
+The plugin connects to the Semirprod online service. Use of that service
+(account, streams, subscription) is governed by its terms of service:
+https://semirprod.fr/terms-of-service
+Those terms apply to the service, not to the software: they do not restrict any
+of the rights the license above grants you.
+
+The Semirprod name and logo are not covered by this license. A modified version
+must not present itself as published by Semirprod.
