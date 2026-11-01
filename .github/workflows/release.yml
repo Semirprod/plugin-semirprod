@@ -203,9 +203,14 @@ jobs:
       # write it): no job publishes it, so it does not leave this runner.
       - name: Collect artifacts
         shell: pwsh
+        env:
+          STAGING_BUILD: ${{ needs.meta.outputs.staging }}
         run: |
           $ErrorActionPreference = 'Stop'
           $files = @("semirprod-plugin-installer-$env:VERSION.exe")
+          # Test build only: the module alone goes into a portable OBS, without
+          # installing over the OBS of the test machine. Removed with the run's files.
+          if ($env:STAGING_BUILD -eq 'true') { $files += "obs-semirprod-plugin-v$env:VERSION-DEV-staging.zip" }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           foreach ($f in $files) {
             if (-not (Test-Path $f)) { throw "expected artifact missing: $f" }
