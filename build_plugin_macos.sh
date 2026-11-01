@@ -147,6 +147,12 @@ if [ -z "$DEPS_DIR" ]; then
     fi
   done
 fi
+# Disposition <arbre>/.deps : Qt et le reste (SIMDe...) sont deux dossiers, et
+# libobsConfig.cmake a besoin du second. Dans ~/.deps, tout est au meme endroit.
+OBS_BASE_DEPS=""
+for candidate in "$OBS_SRC/.deps"/obs-deps-20*-universal; do
+  [ -d "$candidate/include" ] && OBS_BASE_DEPS="$candidate"
+done
 [ -n "$DEPS_DIR" ] && [ -d "$DEPS_DIR" ] \
   || die "Deps Qt d'obs-deps introuvables. Renseigne DEPS_DIR."
 
@@ -212,7 +218,7 @@ CMAKE_ARGS=(
   -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
   # Aligne sur OBS lui-meme (cmake/macos/defaults.cmake du meme arbre).
   -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
-  -DCMAKE_PREFIX_PATH="$DEPS_DIR;$OBS_BUILD/libobs;$OBS_BUILD/frontend/api"
+  -DCMAKE_PREFIX_PATH="$DEPS_DIR;${OBS_BASE_DEPS:+$OBS_BASE_DEPS;}$OBS_BUILD/libobs;$OBS_BUILD/frontend/api"
   # libobsConfig.cmake fait find_dependency(SIMDe), et le finder correspondant
   # vit dans l'arbre OBS, pas dans les deps. Les deux autres scripts font
   # exactement pareil.

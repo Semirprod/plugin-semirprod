@@ -233,7 +233,10 @@ Source: "terms.txt"; DestDir: "{app}\data\obs-plugins\semirprod-studio"; DestNam
 #ifndef QT_TLS_BACKEND_DIR
   #define QT_TLS_BACKEND_DIR "deps\qt6\plugins\tls"
 #endif
-#if !FileExists(AddBackslash(QT_TLS_BACKEND_DIR) + "qschannelbackend.dll")
+; Relatif = depuis la racine du depot, comme Source: (SourceDir). Le preprocesseur,
+; lui, ne connait pas SourceDir : on lui donne le chemin complet pour ce controle.
+#define QtTlsProbe (Pos(":", QT_TLS_BACKEND_DIR) > 0 ? QT_TLS_BACKEND_DIR : AddBackslash(SourcePath) + "..\..\" + QT_TLS_BACKEND_DIR)
+#if !FileExists(AddBackslash(QtTlsProbe) + "qschannelbackend.dll")
   #error qschannelbackend.dll introuvable. Passe le bon dossier : ISCC.exe /DQT_TLS_BACKEND_DIR="<...>\plugins\tls" installer.iss  (sans ce fichier, le plugin livre ne peut faire aucune requete HTTPS)
 #endif
 ; `onlyifdoesntexist` reste : on ne remplace jamais le backend d'un OBS qui a
