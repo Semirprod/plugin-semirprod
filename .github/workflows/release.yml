@@ -454,6 +454,15 @@ jobs:
             || { echo "::error::package not signed with a Developer ID Installer certificate"; exit 1; }
           echo "bundle and package signatures OK"
 
+      # GitHub's macOS runners drop stapler's HTTP/3 (UDP 443) connections to Apple
+      # after about 7 s. Without UDP, stapler falls back to HTTPS over TCP, which
+      # works. Workaround given by GitHub: remove once actions/runner-images#14924
+      # is fixed.
+      - name: Block outbound UDP 443 (actions/runner-images#14924)
+        run: |
+          echo "block return out quick proto udp from any to any port 443" | sudo pfctl -f -
+          sudo pfctl -E
+
       - name: Notarize and staple
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
