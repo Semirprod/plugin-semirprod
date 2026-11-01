@@ -491,7 +491,16 @@ jobs:
             sleep 30
           done
           [ "$stapled" = true ] || { echo "::error::stapling failed after 6 attempts"; exit 1; }
-          xcrun stapler validate "$pkg"
+          # validate also queries Apple over the network. A lost connection here
+          # says nothing about the file: the next step checks the stapled ticket
+          # itself (spctl, pkgutil), and that check is the one that can fail the job.
+          validated=false
+          for attempt in 1 2 3 4 5 6; do
+            if xcrun stapler validate "$pkg"; then validated=true; break; fi
+            echo "validation attempt $attempt failed, retrying in 30 s"
+            sleep 30
+          done
+          [ "$validated" = true ] || echo "::warning::stapler validate unavailable, relying on the Gatekeeper step"
 
       - name: Gatekeeper verdict
         run: |
