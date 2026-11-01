@@ -1,48 +1,13 @@
 # Installer Semirprod pour OBS
 
-Deux façons. La **méthode B (zip)** ne déclenche aucun avertissement Windows :
-c'est celle à privilégier tant que l'installeur n'est pas signé.
-
----
-
-# Méthode B — le zip (recommandée, aucun avertissement)
-
-SmartScreen ne s'occupe que des exécutables. Un zip qui ne contient qu'un
-fichier de plugin ne déclenche donc rien du tout.
-
-1. **Fermer OBS.**
-2. Ouvrir `obs-semirprod-plugin-vX.Y.Z.zip`. Il contient un seul fichier :
-   `obs-plugins\64bit\semirprod-studio.dll`.
-3. Trouver le dossier d'OBS. Le plus simple : clic droit sur le raccourci OBS →
-   **Ouvrir l'emplacement du fichier**, puis remonter jusqu'au dossier qui
-   contient `bin`, `data` et `obs-plugins` (typiquement
-   `C:\Program Files\obs-studio`).
-4. **Glisser le dossier `obs-plugins` du zip dans ce dossier**, et accepter la
-   fusion. Windows demandera peut-être les droits administrateur.
-5. Relancer OBS.
-
-Le zip ne contient volontairement **que notre DLL** : rien qui puisse écraser un
-fichier d'OBS.
-
-Pour désinstaller : supprimer
-`<dossier OBS>\obs-plugins\64bit\semirprod-studio.dll`, OBS fermé. Les réglages
-et le jeton de connexion restent dans
-`%APPDATA%\obs-studio\plugin_config\semirprod-studio` — à supprimer aussi pour
-repartir de zéro.
-
----
-
-# Méthode A — l'installeur (.exe)
-
-Plus confortable (raccourci de désinstallation, vérification de la version
-d'OBS), mais Windows affichera un avertissement parce que le fichier n'est pas
-signé. Quatre points, dans cet ordre.
+Télécharge `semirprod-plugin-installer-X.Y.Z.exe` depuis ton compte Semirprod.
+Windows affichera un avertissement parce que le fichier n'est pas signé. Quatre
+points, dans cet ordre.
 
 ## 1. Fermer OBS
 
-Le plugin est un fichier qu'OBS verrouille tant qu'il tourne. L'installeur sait
-le demander lui-même (il propose de fermer OBS puis de le relancer), mais c'est
-plus simple de le fermer avant.
+L'installeur refuse de continuer tant qu'OBS est ouvert et ne le ferme jamais :
+un OBS ouvert est peut-être en direct. Ferme-le, puis clique **Réessayer**.
 
 ## 2. Débloquer le fichier
 

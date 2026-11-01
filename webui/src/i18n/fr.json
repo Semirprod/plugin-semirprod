@@ -46,6 +46,7 @@
   "update.requiredVersion": "Mise à jour obligatoire · v{version}",
   "update.available": "Mise à jour disponible · v{version}",
   "update.blockedSecurity": "Version bloquée pour une faille de sécurité",
+  "update.resumesAfterLive": "Le pilotage reprendra à la fin du direct ou de l’enregistrement.",
   "update.pausedUntilInstalled": "Le plugin est en pause jusqu’à son installation.",
   "update.securityAdvice": "Mets à jour le plugin pour reprendre le pilotage. Ton direct en cours n’est pas coupé.",
   "update.criticalNotes": "Le plugin peut ne plus fonctionner correctement tant qu’elle n’est pas installée.",

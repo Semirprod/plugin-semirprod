@@ -46,6 +46,7 @@
   "update.requiredVersion": "Required update · v{version}",
   "update.available": "Update available · v{version}",
   "update.blockedSecurity": "Version blocked because of a security flaw",
+  "update.resumesAfterLive": "Remote control will resume when the stream or recording ends.",
   "update.pausedUntilInstalled": "The plugin is paused until it is installed.",
   "update.securityAdvice": "Update the plugin to resume remote control. Your current stream is not interrupted.",
   "update.criticalNotes": "The plugin may stop working properly until it is installed.",

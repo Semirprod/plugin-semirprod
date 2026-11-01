@@ -54,7 +54,7 @@ export function SubscribeNotice({ state, send }: Props) {
     if (live.allowed) return null;
     return (
       <div className="rounded-lg border border-border">
-        <FeatureBlocked verdict={live} state={state} send={send} />
+        <FeatureBlocked verdict={live} send={send} />
       </div>
     );
   }

@@ -88,14 +88,20 @@ public:
   void renewToken(const QString& token) { connectWithToken(token); }
   void disconnectClient();
   /**
-   * Arret ferme : coupe la liaison et refuse toute reconnexion jusqu'a la fin
-   * du processus, renouvellement de jeton compris. Version bloquee ou mise a
-   * jour obligatoire : seule une nouvelle version relance la liaison.
+   * Arret ferme : coupe la liaison et refuse toute reconnexion, renouvellement
+   * de jeton compris. Version bloquee par le serveur : seule une nouvelle version
+   * relance la liaison. Mise a jour critique du manifeste : resume() si un
+   * manifeste signe la retire.
    */
   void halt() {
     halted_ = true;
     disconnectClient();
   }
+  /**
+   * Leve l'arret, sans rien ouvrir : halt() a oublie le jeton, c'est au dock de
+   * rouvrir une session (connectWithToken).
+   */
+  void resume() { halted_ = false; }
   bool isHalted() const { return halted_; }
   /** Appareil v2 : l'identité du poste, tirée par le serveur à l'appairage. */
   void setDeviceId(const QString& deviceId) { deviceId_ = deviceId; }

@@ -541,6 +541,9 @@ private:
   QString pendingUpdateVersion_;
   QString pendingUpdateSeverity_;
   QString pendingUpdateNotes_;
+  // Manifeste signe : plus rien de plus recent. Retire l'offre (popup et bandeau)
+  // sans attendre un redemarrage d'OBS.
+  void clearPendingUpdate();
   // Popup native de mise a jour, sur la fenetre d'OBS : visible meme quand le
   // Studio n'est pas ouvert. « Me rappeler plus tard » = pas avant 24 h
   // (Settings::snoozeUpdate) ; « Ne plus me rappeler » = cette version, dans
@@ -554,22 +557,35 @@ private:
   QPointer<QMessageBox> updatePrompt_;
   void maybePromptUpdate();
   // Pause : version bloquee par le serveur ou mise a jour critique. La liaison
-  // est coupee pour de bon (LiveClient::halt), une popup propose la mise a jour
-  // avec « Plus tard » pour seul autre choix, et revient au prochain lancement.
+  // est coupee (LiveClient::halt), une popup propose la mise a jour avec « Plus
+  // tard » pour seul autre choix, et revient au prochain lancement.
   bool pluginBlocked_ = false;
-  // Pourquoi : faille de securite (refus serveur) ou mise a jour obligatoire
-  // (manifeste critique). Le texte de la popup et du bandeau en depend.
-  enum class BlockReason { Security, UpdateRequired };
+  // Pourquoi, et donc qui peut lever la pause. Security et UpdateRequired sont
+  // des refus du SERVEUR : un manifeste n'a pas a les contredire, le serveur
+  // refuserait de nouveau a la reconnexion. ManifestCritical vient du manifeste
+  // signe, et un manifeste signe peut la lever (maybeLiftUpdatePause).
+  enum class BlockReason { Security, UpdateRequired, ManifestCritical };
   BlockReason blockReason_ = BlockReason::Security;
   bool blockedPromptShown_ = false;
+  QPointer<QMessageBox> blockedPrompt_;
+  // Pause venue du manifeste, que le dernier manifeste signe ne justifie plus.
+  // Lue dans l'etat de l'offre (seul un manifeste verifie l'ecrit) : un retour en
+  // critique pendant l'attente annule donc la levee sans rien avoir a defaire.
+  bool updatePauseNoLongerJustified() const;
+  // Rend le pilotage sans redemarrer OBS. Jamais pendant un direct ou un
+  // enregistrement : reprise a l'arret, comme l'entree en pause.
+  void maybeLiftUpdatePause();
   // Acces au direct refuse : UNE popup par session d'OBS, jamais a chaque
   // verification (le plugin 0.1.5 en ouvrait une a chaque reconnexion).
   bool accessDeniedPromptShown_ = false;
   bool lastAccessDeniedLogged_ = false;
   void maybePromptAccessDenied();
-  bool openUpdateWhenKnown_ = false;
   void enterPluginBlocked(BlockReason reason = BlockReason::Security);
   void showBlockedPrompt();
+  // Le texte de la popup de pause suit l'etat courant. Pause devenue sans objet :
+  // une popup ouverte se retire, sans en rouvrir une par dessus un direct.
+  void applyBlockedPromptText(QMessageBox* box) const;
+  void refreshBlockedPrompt();
   // Studio paywall — GET /api/live/access dit si le compte peut passer en
   // direct (abonnement absent / expiré). L'interface web le rend depuis
   // studioAccess / studioAccessKnown / studioReason ; le dock ne porte plus

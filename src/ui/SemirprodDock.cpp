@@ -167,13 +167,12 @@ SemirprodDock::SemirprodDock(QWidget* parent)
             // Notes tronquees : c'est un texte serveur affiche tel quel, on ne
             // laisse pas un manifeste pousser des kilo-octets dans l'ecran.
             pendingUpdateNotes_ = notes.left(500);
+            refreshBlockedPrompt();
             broadcastToWeb();
-            if (openUpdateWhenKnown_) {
-              openUpdateWhenKnown_ = false;
-              openUpdateDownload();
-            }
             maybePromptUpdate();
           });
+  connect(updateChecker_, &UpdateChecker::noUpdateAvailable, this,
+          &SemirprodDock::clearPendingUpdate);
   updateChecker_->start();
 
   // Toute progression de sauvegarde repart en instantane : l'interface ne sonde
@@ -331,6 +330,9 @@ void SemirprodDock::prepareShutdown() {
   for (QTimer* t : timers) {
     if (t) t->stop();
   }
+  // Le manifeste a son propre minuteur, et une reponse en vol ne doit plus rien
+  // declencher pendant le demontage.
+  if (updateChecker_) updateChecker_->stop();
 
   // Diffusion en cours a la fermeture : on consigne quand meme la session,
   // sinon fermer OBS sans arreter le stream la perdrait.
@@ -3391,12 +3393,86 @@ void SemirprodDock::setInstanceLabel(const QString& label) {
   broadcastToWeb();
 }
 
+namespace {
+/**
+ * Retire une fenetre native parce qu'elle n'a plus d'objet, et non parce que le
+ * streamer y a repondu. Le signal est coupe d'abord : aucun choix (« plus tard »,
+ * « ne plus me rappeler ») ne s'enregistre a sa place. hide + deleteLater plutot
+ * que close(), qui passe par l'evenement de fermeture de QMessageBox.
+ */
+void dismissPrompt(QPointer<QMessageBox>& box, QObject* receiver) {
+  if (!box) return;
+  QObject::disconnect(box.data(), nullptr, receiver, nullptr);
+  box->hide();
+  box->deleteLater();
+  box.clear();
+}
+}  // namespace
+
+void SemirprodDock::clearPendingUpdate() {
+  if (!pendingUpdateVersion_.isEmpty()) {
+    blog(LOG_INFO, "[semirprod-dock] offre de mise a jour v%s retiree par le manifeste",
+         pendingUpdateVersion_.toUtf8().constData());
+    pendingUpdateUrl_.clear();
+    pendingUpdateVersion_.clear();
+    pendingUpdateSeverity_.clear();
+    pendingUpdateNotes_.clear();
+    // Si cette version revient, la popup peut repartir, sauf choix du streamer
+    // encore valable (« ne plus me rappeler », report de 24 h : Settings).
+    updatePromptedVersion_.clear();
+    dismissPrompt(updatePrompt_, this);
+    refreshBlockedPrompt();
+    broadcastToWeb();
+  }
+  maybeLiftUpdatePause();
+}
+
+bool SemirprodDock::updatePauseNoLongerJustified() const {
+  return pluginBlocked_ && blockReason_ == BlockReason::ManifestCritical &&
+         (pendingUpdateVersion_.isEmpty() ||
+          pendingUpdateSeverity_ != QStringLiteral("critical"));
+}
+
+void SemirprodDock::maybeLiftUpdatePause() {
+  if (shuttingDown_ || !updatePauseNoLongerJustified()) return;
+  // Rouvrir la liaison pendant un direct remettrait la regie et la bascule
+  // automatique de scene aux commandes de ce qui est a l'antenne. Le streamer a
+  // decide de ce direct sans elles : on attend l'arret (maybePromptUpdate est
+  // rappele a chaque fin de direct et d'enregistrement).
+  if (obs_frontend_streaming_active() || obs_frontend_recording_active()) return;
+
+  pluginBlocked_ = false;
+  blockReason_ = BlockReason::Security;
+  blockedPromptShown_ = false;
+  dismissPrompt(blockedPrompt_, this);
+  blog(LOG_INFO, "[semirprod-dock] mise a jour critique retiree par le manifeste : fin de la pause");
+  logEvent(QStringLiteral("info"), loc("Journal.UpdatePauseLifted"));
+  liveClient_->resume();
+  // halt() a oublie le jeton, et le superviseur de liaison ignore un client
+  // arrete : rien d'autre ne rouvrirait la session. Une authentification en cours
+  // se termine par connectWithToken, qui passe desormais. L'enregistrement du
+  // poste suit l'ouverture (connectionChanged).
+  const TokenBundle binding = tokenStore_->cached();
+  if (binding.isBound() && !authFlow_->isRunning()) resumeWithBundle(binding);
+  broadcastToWeb();
+}
+
 void SemirprodDock::openUpdateDownload() {
   if (pendingUpdateUrl_.isEmpty()) {
-    // Manifeste pas encore arrive (version bloquee au demarrage, panne) : on
-    // le redemande et l'ouverture suit son arrivee.
-    openUpdateWhenKnown_ = true;
-    updateChecker_->check();
+    // Aucune version superieure a proposer : version bloquee par le serveur,
+    // version retiree, ou manifeste pas encore arrive. La page du compte sert de
+    // destination. Elle s'ouvre tout de suite : differer l'ouverture a l'arrivee
+    // du manifeste ferait surgir un navigateur des heures plus tard, en plein
+    // direct, si le reseau ne revient qu'apres quelques reprises.
+    const QString page = Config::apiBaseUrl() + QStringLiteral("/download");
+    if (QUrl(page).scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0 ||
+        !Config::isAllowedHostFor(page, Config::HostUse::UpdateDownload)) {
+      blog(LOG_ERROR, "[semirprod-dock] page de telechargement refusee : %s",
+           page.toUtf8().constData());
+      return;
+    }
+    logEvent(QStringLiteral("info"), loc("Journal.OpenDownloadPage"));
+    QDesktopServices::openUrl(QUrl(page));
     return;
   }
   logEvent(QStringLiteral("info"),
@@ -3406,21 +3482,26 @@ void SemirprodDock::openUpdateDownload() {
 }
 
 void SemirprodDock::maybePromptUpdate() {
+  // D'abord la pause devenue sans objet : c'est le point de passage de chaque
+  // manifeste verifie et de chaque fin de direct.
+  maybeLiftUpdatePause();
   // Instance infogeree : personne devant l'ecran.
   if (!edition::showsBlockingPrompts()) return;
-  if (shuttingDown_ || !obsLoaded_ || pluginBlocked_ || updatePrompt_) return;
+  if (shuttingDown_ || !obsLoaded_ || pluginBlocked_) return;
   const QString version = pendingUpdateVersion_;
-  if (version.isEmpty() || updatePromptedVersion_ == version) return;
+  if (version.isEmpty()) return;
   // Jamais par dessus un direct ou un enregistrement : reprise a l'arret.
   if (obs_frontend_streaming_active() || obs_frontend_recording_active()) return;
 
   // Critique : le plugin s'arrete jusqu'a la mise a jour. Meme chemin qu'une
-  // version bloquee par le serveur, avec son propre texte.
+  // version bloquee par le serveur, avec son propre texte. Testee AVANT le
+  // dedoublonnage par version : une meme version peut passer de recommandee a
+  // critique, et une popup restee ouverte ne doit pas retarder la pause.
   if (pendingUpdateSeverity_ == QStringLiteral("critical")) {
-    updatePromptedVersion_ = version;
-    enterPluginBlocked(BlockReason::UpdateRequired);
+    enterPluginBlocked(BlockReason::ManifestCritical);
     return;
   }
+  if (updatePrompt_ || updatePromptedVersion_ == version) return;
 
   // Facultative : UNE alerte. « Me rappeler plus tard » la reporte de 24 h,
   // relances d'OBS comprises ; « Ne plus me rappeler » enterre cette version.
@@ -3462,10 +3543,20 @@ void SemirprodDock::maybePromptUpdate() {
 }
 
 void SemirprodDock::enterPluginBlocked(BlockReason reason) {
-  if (pluginBlocked_) return;
+  if (pluginBlocked_) {
+    // En pause par le manifeste, et le serveur refuse a son tour (renouvellement
+    // de session) : son refus prend le pas, un manifeste ne le levera pas.
+    if (blockReason_ == BlockReason::ManifestCritical &&
+        reason != BlockReason::ManifestCritical) {
+      blockReason_ = reason;
+      refreshBlockedPrompt();
+      broadcastToWeb();
+    }
+    return;
+  }
   pluginBlocked_ = true;
   blockReason_ = reason;
-  const bool update = reason == BlockReason::UpdateRequired;
+  const bool update = reason != BlockReason::Security;
   blog(LOG_WARNING, update ? "[semirprod-dock] mise a jour obligatoire : plugin en pause"
                            : "[semirprod-dock] version bloquee par le serveur : pilotage coupe");
   logEvent(QStringLiteral("error"),
@@ -3474,9 +3565,9 @@ void SemirprodDock::enterPluginBlocked(BlockReason reason) {
   // Arret ferme : aucun renouvellement de jeton ne rouvre la liaison. La
   // nouvelle version, elle, repart d'un processus neuf.
   liveClient_->halt();
-  if (updatePrompt_) updatePrompt_->close();
+  dismissPrompt(updatePrompt_, this);
   // Le manifeste n'est peut-etre pas encore arrive (demarrage, panne) : on le
-  // redemande, l'ouverture suivra s'il est demande avant.
+  // redemande, le bandeau suivra.
   if (pendingUpdateUrl_.isEmpty()) updateChecker_->check();
   broadcastToWeb();
   if (obsLoaded_) showBlockedPrompt();
@@ -3487,28 +3578,62 @@ void SemirprodDock::showBlockedPrompt() {
   if (!edition::showsBlockingPrompts()) return;
   if (shuttingDown_ || blockedPromptShown_) return;
   blockedPromptShown_ = true;
+  // Redemandee alors que la precedente est encore ouverte (startAuth) : une seule,
+  // sinon la fin de pause en laisserait une a l'ecran.
+  if (blockedPrompt_) {
+    blockedPrompt_->raise();
+    blockedPrompt_->activateWindow();
+    return;
+  }
   auto* box = new QMessageBox(static_cast<QWidget*>(obs_frontend_get_main_window()));
   box->setAttribute(Qt::WA_DeleteOnClose);
   box->setWindowModality(Qt::NonModal);
-  box->setIcon(QMessageBox::Critical);
   box->setWindowTitle(QStringLiteral("Semirprod"));
   box->setTextFormat(Qt::PlainText);
-  if (blockReason_ == BlockReason::UpdateRequired) {
-    box->setText(loc("Box.UpdateRequired")
-                     .arg(pendingUpdateVersion_));
-    if (!pendingUpdateNotes_.isEmpty()) box->setInformativeText(pendingUpdateNotes_);
+  applyBlockedPromptText(box);
+  QPushButton* install = nullptr;
+  if (updatePauseNoLongerJustified()) {
+    // Plus rien d'obligatoire a installer : la popup informe, elle ne demande rien.
+    box->addButton(QMessageBox::Ok);
+  } else {
+    install = box->addButton(loc("Box.Update"), QMessageBox::AcceptRole);
+    // Seul choix a cote de la mise a jour : la popup revient au prochain lancement.
+    box->addButton(loc("Box.Later"), QMessageBox::RejectRole);
+    box->setDefaultButton(install);
+  }
+  connect(box, &QMessageBox::buttonClicked, this, [this, install](QAbstractButton* b) {
+    if (install && b == install) openUpdateDownload();
+  });
+  blockedPrompt_ = box;
+  box->show();
+}
+
+void SemirprodDock::applyBlockedPromptText(QMessageBox* box) const {
+  if (updatePauseNoLongerJustified()) {
+    box->setIcon(QMessageBox::Information);
+    box->setText(loc("Box.UpdateNoLongerRequired"));
+    box->setInformativeText(QString());
+    return;
+  }
+  box->setIcon(QMessageBox::Critical);
+  if (blockReason_ != BlockReason::Security) {
+    box->setText(pendingUpdateVersion_.isEmpty()
+                     ? loc("Box.UpdateRequiredNoVersion")
+                     : loc("Box.UpdateRequired").arg(pendingUpdateVersion_));
+    box->setInformativeText(pendingUpdateNotes_);
   } else {
     box->setText(loc("Box.Blocked"));
     box->setInformativeText(loc("Box.BlockedInfo"));
   }
-  QPushButton* install = box->addButton(loc("Box.Update"), QMessageBox::AcceptRole);
-  // Seul choix a cote de la mise a jour : la popup revient au prochain lancement.
-  box->addButton(loc("Box.Later"), QMessageBox::RejectRole);
-  box->setDefaultButton(install);
-  connect(box, &QMessageBox::buttonClicked, this, [this, install](QAbstractButton* b) {
-    if (b == install) openUpdateDownload();
-  });
-  box->show();
+}
+
+void SemirprodDock::refreshBlockedPrompt() {
+  if (!blockedPrompt_) return;
+  if (updatePauseNoLongerJustified()) {
+    dismissPrompt(blockedPrompt_, this);
+    return;
+  }
+  applyBlockedPromptText(blockedPrompt_.data());
 }
 
 namespace {
@@ -4958,9 +5083,11 @@ void SemirprodDock::broadcastToWeb() {
   state["updateNotes"] = pendingUpdateNotes_;
   // Mode securite : la version installee est bloquee, le pilotage est coupe.
   state["pluginBlocked"] = pluginBlocked_;
-  state["pluginBlockReason"] = blockReason_ == BlockReason::UpdateRequired
-                                   ? QStringLiteral("update_required")
-                                   : QStringLiteral("security");
+  state["pluginBlockReason"] = blockReason_ == BlockReason::Security
+                                   ? QStringLiteral("security")
+                                   : QStringLiteral("update_required");
+  // La mise a jour n'est plus obligatoire, mais un direct retient la reprise.
+  state["pluginBlockLiftPending"] = updatePauseNoLongerJustified();
   // Identité du compte lié, elle, valable APRÈS l'appairage. Sans ces deux
   // champs, l'interface ne pouvait pas dire quel compte etait connecté.
   state["accountName"] = accountName_;

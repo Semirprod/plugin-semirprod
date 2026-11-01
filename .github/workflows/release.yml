@@ -6,10 +6,11 @@
 #
 # Tag v<version> pushed to Semirprod/plugin-semirprod: the same builds, then
 #   - macOS: Developer ID signature, notarization, stapling (job "macos-signed");
-#   - a DRAFT GitHub Release with every binary, the source archive and
-#     SHA256SUMS.txt (job "publish");
+#   - a DRAFT GitHub Release with the source archive and SHA256SUMS.txt, and no
+#     binary: downloads go through the Semirprod account (job "publish");
 #   - each installer uploaded as a DRAFT to Semirprod. Nothing reaches users
-#     until a draft is promoted by hand.
+#     until a draft is promoted by hand;
+#   - this run's build artifacts deleted once published (job "staging-cleanup").
 # Push to the branch "staging": the same pipeline as a TEST build. Its plugin
 # accepts pre-production servers, so it never reaches users: no GitHub Release,
 # and its files go only to the pre-production admin, then are deleted from the
@@ -20,6 +21,12 @@
 # secret below (signing material and SEMIRPROD_RELEASE_UPLOAD_TOKEN), lives in
 # THIS public repository (Semirprod/plugin-semirprod), not in any private
 # Semirprod repository: the workflow that reads them is this one.
+#
+# Build artifacts are kept 1 day on every path, because this repository is
+# public. On a tag, windows and linux finish before macos-signed starts, and
+# publish starts after it: both approvals of the "release" environment and the
+# macOS build between them must fit within that day, or the run must be started
+# again to rebuild them.
 #
 # Runner images are pinned on purpose:
 #   windows-2022  Visual Studio 2022 and Windows SDK 10.0.22621, the toolchain of
@@ -116,7 +123,6 @@ jobs:
     timeout-minutes: 120
     env:
       VERSION: ${{ needs.meta.outputs.version }}
-      DEV_SUFFIX: ${{ needs.meta.outputs.staging == 'true' && '-DEV-staging' || '' }}
     steps:
       # build_plugin.bat is stored with CRLF line endings (cmd.exe needs them
       # for its labels) and the shell scripts with LF: check out bytes as-is.
@@ -193,11 +199,13 @@ jobs:
         shell: pwsh
         run: throw "Authenticode signing is not configured"
 
+      # The zip stays a local build output (build_plugin.bat fails if it cannot
+      # write it): no job publishes it, so it does not leave this runner.
       - name: Collect artifacts
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @("semirprod-plugin-installer-$env:VERSION.exe", "obs-semirprod-plugin-v$env:VERSION$env:DEV_SUFFIX.zip")
+          $files = @("semirprod-plugin-installer-$env:VERSION.exe")
           New-Item -ItemType Directory -Force -Path out | Out-Null
           foreach ($f in $files) {
             if (-not (Test-Path $f)) { throw "expected artifact missing: $f" }
@@ -210,7 +218,7 @@ jobs:
           name: windows
           path: out/
           if-no-files-found: error
-          retention-days: ${{ needs.meta.outputs.staging == 'true' && 1 || 14 }}
+          retention-days: 1
 
   linux:
     name: Linux x86_64
@@ -262,7 +270,7 @@ jobs:
           name: linux
           path: out/
           if-no-files-found: error
-          retention-days: ${{ needs.meta.outputs.staging == 'true' && 1 || 14 }}
+          retention-days: 1
 
   # Pull requests, main, forks: same build, ad-hoc signature, unsigned .pkg.
   # It needs no secret and cannot fail for lack of one.
@@ -301,7 +309,7 @@ jobs:
           name: macos-unsigned
           path: out/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
   # Official tags only. Waits for approval on the "release" environment.
   macos-signed:
@@ -534,7 +542,7 @@ jobs:
           name: macos
           path: out/
           if-no-files-found: error
-          retention-days: ${{ needs.meta.outputs.staging == 'true' && 1 || 14 }}
+          retention-days: 1
 
   # Official tags wait for approval on the "release" environment. The "staging"
   # branch uses the "staging" environment: only its server and its token differ.
@@ -564,23 +572,28 @@ jobs:
         if: needs.meta.outputs.release == 'true'
         run: |
           set -euo pipefail
-          expected=(
+          # What users can download from their Semirprod account.
+          installers=(
             "semirprod-plugin-installer-$VERSION.exe"
-            "obs-semirprod-plugin-v$VERSION.zip"
             "semirprod-plugin-$VERSION.pkg"
             "obs-semirprod-plugin-v$VERSION-linux-x86_64.tar.gz"
           )
-          for f in "${expected[@]}"; do
+          for f in "${installers[@]}"; do
             test -f "dist/$f" || { echo "::error::missing artifact: $f"; exit 1; }
           done
-          if [ "$(find dist -maxdepth 1 -type f | wc -l)" -ne "${#expected[@]}" ]; then
+          if [ "$(find dist -maxdepth 1 -type f | wc -l)" -ne "${#installers[@]}" ]; then
             echo "::error::unexpected files in the build output"; ls -la dist; exit 1
           fi
+          # Everything the draft release carries goes in its own folder: no binary
+          # can reach it by accident. dist/ stays as it is for the upload step.
+          mkdir release-assets
           # Complete corresponding source (GPL): this repository at the tag.
+          source_archive="obs-semirprod-plugin-v$VERSION-source.tar.gz"
           git archive --format=tar.gz --prefix="obs-semirprod-plugin-v$VERSION-source/" \
-            -o "dist/obs-semirprod-plugin-v$VERSION-source.tar.gz" "$GITHUB_SHA"
-          (cd dist && sha256sum -- * > SHA256SUMS.txt)
-          cat dist/SHA256SUMS.txt
+            -o "release-assets/$source_archive" "$GITHUB_SHA"
+          (cd dist && sha256sum -- "${installers[@]}") > release-assets/SHA256SUMS.txt
+          (cd release-assets && sha256sum -- "$source_archive") >> release-assets/SHA256SUMS.txt
+          cat release-assets/SHA256SUMS.txt
 
       - name: Create or update the GitHub draft release
         if: needs.meta.outputs.release == 'true'
@@ -596,11 +609,19 @@ jobs:
               echo "::error::release $TAG is already published; its files are not replaced"
               exit 1
             fi
-            gh release upload "$TAG" dist/* --clobber
+            gh release upload "$TAG" release-assets/* --clobber
+            # A draft made before this rule may still carry binaries.
+            gh release view "$TAG" --json assets --jq '.assets[].name' \
+              | while IFS= read -r name; do
+                  case "$name" in
+                    "obs-semirprod-plugin-v$VERSION-source.tar.gz"|SHA256SUMS.txt) ;;
+                    *) gh release delete-asset "$TAG" "$name" --yes ;;
+                  esac
+                done
           else
-            gh release create "$TAG" dist/* --draft --verify-tag \
+            gh release create "$TAG" release-assets/* --draft --verify-tag \
               --title "Semirprod for OBS $VERSION" \
-              --notes "Built from $TAG ($GITHUB_SHA). Verify downloads against SHA256SUMS.txt. The source archive is the complete corresponding source of these binaries (GPL-2.0-or-later)."
+              --notes "Built from $TAG ($GITHUB_SHA). Installers are downloaded from a Semirprod account; verify them against SHA256SUMS.txt. The source archive is their complete corresponding source (GPL-2.0-or-later)."
           fi
 
       - name: Upload drafts to Semirprod
@@ -655,11 +676,24 @@ jobs:
           upload linux "dist/obs-semirprod-plugin-v$VERSION-linux-x86_64$DEV_SUFFIX.tar.gz" || rc=1
           exit "$rc"
 
-  # A test build must not stay downloadable from this public repository.
+  # Staging and official tags only: their builds do not stay downloadable from
+  # this public repository once this job has run. Pull requests, main and forks
+  # keep theirs until the 1-day retention ends. It runs after publish, which has
+  # downloaded and uploaded its files by then.
+  #
+  # Test build: always deleted, even after a failure. A re-run rebuilds it.
+  #
+  # Official tag: deleted only once publish has succeeded. Deleting after a failed
+  # upload would make "Re-run failed jobs" impossible: the signed, notarized .pkg
+  # would be gone, and only a full re-run (an hour or more, new binaries, new
+  # checksums) could retry. The cost of keeping them is that a failed run stays
+  # downloadable until its 1-day retention ends, the same exposure as while the
+  # run waits for approval. Without a re-run within that day, a full re-run is
+  # needed anyway. The re-run of the failed jobs comes back here and deletes them.
   staging-cleanup:
-    name: Remove test build files
+    name: Remove build files
     needs: [meta, windows, linux, macos-signed, publish]
-    if: ${{ always() && needs.meta.outputs.staging == 'true' }}
+    if: ${{ always() && (needs.meta.outputs.staging == 'true' || (needs.meta.outputs.release == 'true' && needs.publish.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

@@ -1,6 +1,7 @@
 #!/bin/bash
 #
-# Retire l'ancien bundle AVANT d'installer le nouveau.
+# Refuse d'installer tant qu'OBS tourne, puis retire l'ancien bundle AVANT
+# d'installer le nouveau.
 #
 # Un paquet remplace les fichiers qu'il apporte, mais ne supprime jamais ceux
 # qu'une version precedente avait poses et que la nouvelle n'a plus. Dans un
@@ -8,6 +9,33 @@
 # signature du bundle, et macOS refuse alors de charger le module — apres une
 # installation qui s'est pourtant deroulee sans erreur.
 set -u
+
+# --- OBS ouvert : on s'arrete, sans avoir touche a quoi que ce soit ---
+#
+# OBS ouvert = peut-etre un direct en cours, et il a ce bundle charge en memoire.
+# Meme regle que l'installeur Windows : refuser, ne rien fermer. Dernier rempart
+# derriere l'installation-check de distribution.xml, qui ne voit pas un OBS lance
+# apres l'ouverture du paquet. Sortie non nulle = Installer abandonne ; aucune
+# question posee, donc sur aussi avec `installer` en ligne de commande.
+#
+# pgrep plutot que l'identite de l'utilisateur : selon le mode, ce script tourne
+# sous l'utilisateur (installeur graphique, domaine utilisateur) ou sous root
+# (sudo installer), et pgrep voit les processus de tous dans les deux cas. Un OBS
+# ouvert dans une autre session refuse donc aussi : prudent, comme sous Windows.
+#
+# Nom exact, sans casse : `OBS` dans OBS.app, `obs` pour un build maison. Exclut
+# les processus auxiliaires (`OBS Helper`). pgrep rend 0 = trouve, 1 = rien, plus
+# = erreur ; une verification impossible refuse aussi.
+/usr/bin/pgrep -ix obs >/dev/null 2>&1
+OBS_CHECK=$?
+if [ "$OBS_CHECK" -eq 0 ]; then
+  echo "semirprod: OBS est ouvert, installation refusee, rien n'a ete modifie." >&2
+  exit 1
+fi
+if [ "$OBS_CHECK" -ne 1 ]; then
+  echo "semirprod: impossible de verifier si OBS est ouvert (pgrep $OBS_CHECK), installation refusee, rien n'a ete modifie." >&2
+  exit 1
+fi
 
 # --- Ou installe-t-on, exactement ---
 #

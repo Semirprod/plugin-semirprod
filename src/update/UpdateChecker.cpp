@@ -7,6 +7,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
+#include <QRandomGenerator>
 #include <QStringList>
 #include <QTimer>
 #include <QUrl>
@@ -449,127 +450,238 @@ bool verifySignature(const QString& version,
   return true;
 }
 
+// Retire le `v` de tete et le suffixe de pre-version (voir isNewer).
+QString normalizeVersion(QString version) {
+  if (version.startsWith('v') || version.startsWith('V')) version.remove(0, 1);
+  const int dash = version.indexOf('-');
+  if (dash >= 0) version.truncate(dash);
+  return version;
+}
+
+// Tous les segments sont des nombres : isNewer() peut comparer pour de vrai.
+bool isComparableVersion(const QString& version) {
+  const QStringList parts = normalizeVersion(version).split('.');
+  for (const QString& part : parts) {
+    bool ok = false;
+    part.toInt(&ok);
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// Rythme des verifications. Un cycle FIXE ferait verifier tout le parc au meme
+// instant des qu'un evenement commun l'a aligne (reprise apres une panne du
+// serveur, soiree de lancement) : chaque cycle tire donc son propre decalage.
+constexpr int kCheckIntervalMs = 6 * 60 * 60 * 1000;
+constexpr int kCheckJitterMs = 30 * 60 * 1000;
+
+// Reprise apres echec : 5, 10, 20, 40, 80, 160, 320 min, puis 360 min. Le
+// decalage (+/- 20 %) compte ici plus qu'ailleurs : une panne du serveur fait
+// echouer tout le parc en meme temps, et il reviendrait d'un seul bloc.
+constexpr int kRetryBaseMs = 5 * 60 * 1000;
+constexpr int kRetryJitterDivisor = 5;
+constexpr int kMaxCountedFailures = 8;
+
+// `failures` commence a 1. Plafonne a la duree du cycle normal, avant decalage :
+// a +/- 20 %, un essai peut donc partir des 288 min, contre 330 min au plus tot
+// pour un poste en bonne sante.
+int backoffDelayMs(int failures) {
+  const int shift = std::clamp(failures - 1, 0, kMaxCountedFailures - 1);
+  const qint64 delayMs = static_cast<qint64>(kRetryBaseMs) << shift;
+  return static_cast<int>(std::min<qint64>(delayMs, kCheckIntervalMs));
+}
+
+// `baseMs` a +/- `maxDeltaMs`, `draw` etant un tirage aleatoire. Separe du
+// generateur pour rester testable.
+int withJitter(int baseMs, int maxDeltaMs, quint32 draw) {
+  const qint64 span = 2LL * maxDeltaMs + 1;
+  return static_cast<int>(baseMs - maxDeltaMs + static_cast<qint64>(draw) % span);
+}
+
 } // namespace
 
 UpdateChecker::UpdateChecker(HttpClient* http, QObject* parent)
     : QObject(parent), http_(http), timer_(new QTimer(this)) {
-  timer_->setInterval(6 * 60 * 60 * 1000); // 6h
+  // Un seul coup a la fois : c'est la fin d'une verification qui arme la
+  // suivante. Il ne peut donc jamais y avoir deux requetes en vol, ni un minuteur
+  // qui tombe pendant qu'une reponse se fait attendre.
+  timer_->setSingleShot(true);
   connect(timer_, &QTimer::timeout, this, &UpdateChecker::check);
 }
 
 void UpdateChecker::start() {
   check();
-  timer_->start();
+}
+
+void UpdateChecker::stop() {
+  stopped_ = true;
+  timer_->stop();
 }
 
 void UpdateChecker::check() {
-  if (!http_) return;
+  if (!http_ || inFlight_ || stopped_) return;
+  // Pose AVANT l'appel : HttpClient rappelle de facon synchrone quand il refuse
+  // l'URL. Elle reste posee pendant le traitement, car un abonne de
+  // updateAvailable peut redemander une verification (enterPluginBlocked) : ce
+  // serait sinon une seconde requete lancee depuis le rappel de la premiere.
+  inFlight_ = true;
+  timer_->stop();
   const QString url = Config::updateManifestUrl();
   QPointer<UpdateChecker> self(this);
   http_->getJson(url, QString(), [self](const HttpResponse& res, const QJsonDocument& doc) {
     if (!self) return;
-    if (!res.ok() || !doc.isObject()) {
-      blog(LOG_INFO, "[semirprod-studio] update check failed (status=%d)", res.statusCode);
+    if (self->stopped_) {
+      self->inFlight_ = false;
       return;
     }
-    // L'API enveloppe ses reponses dans { success, data } — comme /api/me et
-    // /api/live/access. Lire la RACINE donnait une version vide, donc une sortie
-    // silencieuse trois lignes plus bas : aucune mise a jour n'a jamais pu etre
-    // signalee, quelle que soit la version installee, et rien dans le journal ne
-    // le disait. Meme bug que celui deja corrige sur /api/me.
-    //
-    // Tolerant dans les deux sens : si l'API cesse un jour d'envelopper, la
-    // racine reprend la main sans changement de code.
-    const auto root = doc.object();
-    const auto data = root.value(QStringLiteral("data")).toObject();
-    const auto obj = data.isEmpty() ? root : data;
-
-    const QString latest = obj.value(QStringLiteral("version")).toString();
-    const QString downloadUrl = obj.value(QStringLiteral("downloadUrl")).toString();
-    const QString notes = obj.value(QStringLiteral("notes")).toString();
-    QString severity = obj.value(QStringLiteral("severity")).toString();
-    if (severity != QStringLiteral("recommended") && severity != QStringLiteral("critical")) {
-      severity = QStringLiteral("info");
-    }
-    if (latest.isEmpty()) {
-      // Plus de sortie muette : c'est ce silence qui a cache le bug ci-dessus
-      // pendant des semaines. Un manifeste illisible doit se voir dans le
-      // journal, c'est le seul endroit ou l'on peut le constater.
-      blog(LOG_WARNING,
-           "[semirprod-studio] manifeste de mise a jour sans champ 'version' — "
-           "ignore (%d octets recus)",
-           static_cast<int>(res.body.size()));
-      return;
-    }
-
-    // TOUT manifeste doit être signé, sans exception.
-    //
-    // La vérification vivait auparavant à l'INTÉRIEUR d'un
-    // `if (!downloadUrl.isEmpty())`, alors que l'émission vers l'UI est à
-    // l'extérieur : un manifeste avec `downloadUrl: ""` ne subissait donc AUCUN
-    // contrôle, et `version`, `notes` et `severity` — tous choisis par le
-    // serveur — traversaient jusqu'à une QMessageBox modale « Mise à jour
-    // obligatoire » affichée dans OBS. Un serveur compromis pouvait faire
-    // afficher son propre texte au streamer sans posséder aucun secret.
-    //
-    // Un `downloadUrl` vide fait partie du message canonique, il est donc
-    // signable tel quel : rien n'empêche le backend de signer ce cas.
-    // Empreinte et taille de l'artefact designe par `downloadUrl`. Les deux
-    // sont COUVERTES par la signature (voir canonicalMessage) : c'est ce qui
-    // les rend exploitables. En v1, `sizeBytes` vivait a cote de la signature
-    // sans etre signe, donc reecrivable a volonte.
-    //
-    // Le plugin ne telecharge pas lui-meme — il ouvre l'URL dans le
-    // navigateur — donc il ne peut pas VERIFIER le fichier. Ce qu'il peut, et
-    // ce qui a de la valeur pour un produit distribue sans signature
-    // Authenticode : republier une empreinte authentifiee, contre laquelle un
-    // client ou le support compare son telechargement.
-    const QString sha256Hex =
-        obj.value(QStringLiteral("sha256")).toString().toLower();
-    const qint64 sizeBytes =
-        static_cast<qint64>(obj.value(QStringLiteral("sizeBytes")).toDouble(0));
-
-    const auto sigObj = obj.value(QStringLiteral("signature")).toObject();
-    const QString sigAlg = sigObj.value(QStringLiteral("alg")).toString();
-    const int sigVersion = sigObj.value(QStringLiteral("v")).toInt(0);
-    const QString sigB64 = sigObj.value(QStringLiteral("sig")).toString();
-    if (!verifySignature(latest, downloadUrl, notes, severity, sha256Hex,
-                         sizeBytes, sigAlg, sigVersion, sigB64)) {
-      return;
-    }
-
-    if (!downloadUrl.isEmpty()) {
-      // Belt-and-suspenders: even after signature verification, the download
-      // URL itself must point at our infra. Otherwise an attacker who finds
-      // a way to sign with a stolen secret can still hijack where the
-      // download actually lands (signed URL → payload served from attacker).
-      // Et pas n'importe quel hote autorise : seulement celui des
-      // telechargements (Config::HostUse::UpdateDownload), jamais le site
-      // vitrine ni l'hote live.
-      if (!Config::isAllowedHostFor(downloadUrl, Config::HostUse::UpdateDownload)) {
-        blog(LOG_ERROR,
-             "[semirprod-studio] update signed but downloadUrl not on allowlist: %s",
-             downloadUrl.toUtf8().constData());
-        return;
-      }
-      // HTTPS obligatoire : un lien http:// vers un hote autorise laisserait
-      // n'importe qui sur le reseau du client remplacer l'installeur en route.
-      if (QUrl(downloadUrl).scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0) {
-        blog(LOG_ERROR,
-             "[semirprod-studio] update signed but downloadUrl is not https: %s",
-             downloadUrl.toUtf8().constData());
-        return;
-      }
-    }
-
-    const QString current = QStringLiteral(SEMIRPROD_PLUGIN_VERSION);
-    if (UpdateChecker::isNewer(latest, current)) {
-      blog(LOG_INFO, "[semirprod-studio] update available: %s -> %s (severity=%s)",
-           current.toUtf8().constData(), latest.toUtf8().constData(),
-           severity.toUtf8().constData());
-      emit self->updateAvailable(latest, downloadUrl, notes, severity);
-    }
+    const CheckOutcome outcome = self->handleManifest(res, doc);
+    if (!self) return;
+    self->inFlight_ = false;
+    self->scheduleNext(outcome);
   });
+}
+
+void UpdateChecker::scheduleNext(CheckOutcome outcome) {
+  if (stopped_) return;
+  const quint32 draw = QRandomGenerator::global()->generate();
+  if (outcome == CheckOutcome::Failed) {
+    failures_ = std::min(failures_ + 1, kMaxCountedFailures);
+    const int baseMs = backoffDelayMs(failures_);
+    const int delayMs = withJitter(baseMs, baseMs / kRetryJitterDivisor, draw);
+    blog(LOG_INFO, "[semirprod-studio] update check: nouvel essai dans %d s (echec %d)",
+         delayMs / 1000, failures_);
+    timer_->start(delayMs);
+    return;
+  }
+  // Seul un manifeste verifie remet la reprise a zero. Un 404 ne prouve rien sur
+  // le chemin de confiance : il suit le cycle normal sans effacer le compteur.
+  if (outcome == CheckOutcome::Verified) failures_ = 0;
+  timer_->start(withJitter(kCheckIntervalMs, kCheckJitterMs, draw));
+}
+
+UpdateChecker::CheckOutcome UpdateChecker::handleManifest(const HttpResponse& res,
+                                                          const QJsonDocument& doc) {
+  if (!res.ok() || !doc.isObject()) {
+    blog(LOG_INFO, "[semirprod-studio] update check failed (status=%d)", res.statusCode);
+    // Rien n'est parti (URL absente ou hors allowlist), ou le serveur dit qu'il
+    // n'a aucun build pour cette plateforme : reessayer plus tot ne changera
+    // rien. Tout le reste (reseau, 5xx, portail captif) peut se reparer seul.
+    return (res.refusedLocally || res.statusCode == 404) ? CheckOutcome::FailedNoRetry
+                                                         : CheckOutcome::Failed;
+  }
+  // L'API enveloppe ses reponses dans { success, data } — comme /api/me et
+  // /api/live/access. Lire la RACINE donnait une version vide, donc une sortie
+  // silencieuse trois lignes plus bas : aucune mise a jour n'a jamais pu etre
+  // signalee, quelle que soit la version installee, et rien dans le journal ne
+  // le disait. Meme bug que celui deja corrige sur /api/me.
+  //
+  // Tolerant dans les deux sens : si l'API cesse un jour d'envelopper, la
+  // racine reprend la main sans changement de code.
+  const auto root = doc.object();
+  const auto data = root.value(QStringLiteral("data")).toObject();
+  const auto obj = data.isEmpty() ? root : data;
+
+  const QString latest = obj.value(QStringLiteral("version")).toString();
+  const QString downloadUrl = obj.value(QStringLiteral("downloadUrl")).toString();
+  const QString notes = obj.value(QStringLiteral("notes")).toString();
+  QString severity = obj.value(QStringLiteral("severity")).toString();
+  if (severity != QStringLiteral("recommended") && severity != QStringLiteral("critical")) {
+    severity = QStringLiteral("info");
+  }
+  if (latest.isEmpty()) {
+    // Plus de sortie muette : c'est ce silence qui a cache le bug ci-dessus
+    // pendant des semaines. Un manifeste illisible doit se voir dans le
+    // journal, c'est le seul endroit ou l'on peut le constater.
+    blog(LOG_WARNING,
+         "[semirprod-studio] manifeste de mise a jour sans champ 'version' — "
+         "ignore (%d octets recus)",
+         static_cast<int>(res.body.size()));
+    return CheckOutcome::Failed;
+  }
+
+  // TOUT manifeste doit être signé, sans exception.
+  //
+  // La vérification vivait auparavant à l'INTÉRIEUR d'un
+  // `if (!downloadUrl.isEmpty())`, alors que l'émission vers l'UI est à
+  // l'extérieur : un manifeste avec `downloadUrl: ""` ne subissait donc AUCUN
+  // contrôle, et `version`, `notes` et `severity` — tous choisis par le
+  // serveur — traversaient jusqu'à une QMessageBox modale « Mise à jour
+  // obligatoire » affichée dans OBS. Un serveur compromis pouvait faire
+  // afficher son propre texte au streamer sans posséder aucun secret.
+  //
+  // Un `downloadUrl` vide fait partie du message canonique, il est donc
+  // signable tel quel : rien n'empêche le backend de signer ce cas.
+  // Empreinte et taille de l'artefact designe par `downloadUrl`. Les deux
+  // sont COUVERTES par la signature (voir canonicalMessage) : c'est ce qui
+  // les rend exploitables. En v1, `sizeBytes` vivait a cote de la signature
+  // sans etre signe, donc reecrivable a volonte.
+  //
+  // Le plugin ne telecharge pas lui-meme — il ouvre l'URL dans le
+  // navigateur — donc il ne peut pas VERIFIER le fichier. Ce qu'il peut, et
+  // ce qui a de la valeur pour un produit distribue sans signature
+  // Authenticode : republier une empreinte authentifiee, contre laquelle un
+  // client ou le support compare son telechargement.
+  const QString sha256Hex =
+      obj.value(QStringLiteral("sha256")).toString().toLower();
+  const qint64 sizeBytes =
+      static_cast<qint64>(obj.value(QStringLiteral("sizeBytes")).toDouble(0));
+
+  const auto sigObj = obj.value(QStringLiteral("signature")).toObject();
+  const QString sigAlg = sigObj.value(QStringLiteral("alg")).toString();
+  const int sigVersion = sigObj.value(QStringLiteral("v")).toInt(0);
+  const QString sigB64 = sigObj.value(QStringLiteral("sig")).toString();
+  if (!verifySignature(latest, downloadUrl, notes, severity, sha256Hex,
+                       sizeBytes, sigAlg, sigVersion, sigB64)) {
+    return CheckOutcome::Failed;
+  }
+
+  if (!downloadUrl.isEmpty()) {
+    // Belt-and-suspenders: even after signature verification, the download
+    // URL itself must point at our infra. Otherwise an attacker who finds
+    // a way to sign with a stolen secret can still hijack where the
+    // download actually lands (signed URL → payload served from attacker).
+    // Et pas n'importe quel hote autorise : seulement celui des
+    // telechargements (Config::HostUse::UpdateDownload), jamais le site
+    // vitrine ni l'hote live.
+    if (!Config::isAllowedHostFor(downloadUrl, Config::HostUse::UpdateDownload)) {
+      blog(LOG_ERROR,
+           "[semirprod-studio] update signed but downloadUrl not on allowlist: %s",
+           downloadUrl.toUtf8().constData());
+      return CheckOutcome::Failed;
+    }
+    // HTTPS obligatoire : un lien http:// vers un hote autorise laisserait
+    // n'importe qui sur le reseau du client remplacer l'installeur en route.
+    if (QUrl(downloadUrl).scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0) {
+      blog(LOG_ERROR,
+           "[semirprod-studio] update signed but downloadUrl is not https: %s",
+           downloadUrl.toUtf8().constData());
+      return CheckOutcome::Failed;
+    }
+  }
+
+  // isNewer() rend faux pour une version illisible. Sans ce filtre, une telle
+  // version passerait pour « rien de plus recent » et effacerait une offre.
+  if (!isComparableVersion(latest)) {
+    blog(LOG_WARNING, "[semirprod-studio] update manifest: version illisible, ignoree");
+    return CheckOutcome::Failed;
+  }
+
+  const QString current = QStringLiteral(SEMIRPROD_PLUGIN_VERSION);
+  if (isNewer(latest, current)) {
+    blog(LOG_INFO, "[semirprod-studio] update available: %s -> %s (severity=%s)",
+         current.toUtf8().constData(), latest.toUtf8().constData(),
+         severity.toUtf8().constData());
+    emit updateAvailable(latest, downloadUrl, notes, severity);
+  } else {
+    // Reponse normale, pas une anomalie : une version retiree ou bloquee sort du
+    // manifeste, qui retombe sur le build publie precedent, parfois plus ancien
+    // que celui qui tourne ici.
+    blog(LOG_INFO, "[semirprod-studio] no update: latest %s, running %s",
+         latest.toUtf8().constData(), current.toUtf8().constData());
+    emit noUpdateAvailable();
+  }
+  // Rien apres l'emission ne touche a l'objet : un abonne peut tout faire.
+  return CheckOutcome::Verified;
 }
 
 bool UpdateChecker::isNewer(const QString& candidate, const QString& current) {
@@ -579,14 +691,8 @@ bool UpdateChecker::isNewer(const QString& candidate, const QString& current) {
   // release-candidate of the version we're already on). The downside is
   // that 1.0.0-rc.1 < 1.0.0 in semver, but for the plugin's purposes
   // "pre-release of X" and "X" are the same upgrade target.
-  auto normalize = [](QString s) {
-    if (s.startsWith('v') || s.startsWith('V')) s.remove(0, 1);
-    const int dash = s.indexOf('-');
-    if (dash >= 0) s.truncate(dash);
-    return s;
-  };
-  const QStringList a = normalize(candidate).split('.');
-  const QStringList b = normalize(current).split('.');
+  const QStringList a = normalizeVersion(candidate).split('.');
+  const QStringList b = normalizeVersion(current).split('.');
   const int n = std::max(a.size(), b.size());
   for (int i = 0; i < n; ++i) {
     bool okA = false, okB = false;

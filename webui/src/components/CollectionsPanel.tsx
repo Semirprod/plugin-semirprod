@@ -178,7 +178,7 @@ export function CollectionsPanel({
   if (backupFeature && !backupFeature.allowed) {
     return (
       <Section title={t('collections.title')}>
-        <FeatureBlocked verdict={backupFeature} state={state} send={send} />
+        <FeatureBlocked verdict={backupFeature} send={send} />
       </Section>
     );
   }

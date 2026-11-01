@@ -1,6 +1,7 @@
 #include "Config.hpp"
 
 #include "Edition.hpp"
+#include "Locale.hpp"
 
 #include <QByteArray>
 #include <QHostAddress>
@@ -271,6 +272,11 @@ QString Config::updateManifestUrl() {
   // une « critique » ne doit pas la masquer).
   if (!query.hasQueryItem(QStringLiteral("current"))) {
     query.addQueryItem(QStringLiteral("current"), QStringLiteral(SEMIRPROD_PLUGIN_VERSION));
+  }
+  // Langue d'OBS : `notes` revient dans cette langue, et le texte reste couvert
+  // par la signature. Meme detection que l'interface web et Accept-Language.
+  if (!query.hasQueryItem(QStringLiteral("lang"))) {
+    query.addQueryItem(QStringLiteral("lang"), uiLocaleCode());
   }
   url.setQuery(query);
   return url.toString();

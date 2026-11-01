@@ -3,11 +3,13 @@
 #include <QObject>
 #include <QString>
 
+class QJsonDocument;
 class QTimer;
 
 namespace semirprod {
 
 class HttpClient;
+struct HttpResponse;
 
 /**
  * Update manifest checker.
@@ -66,9 +68,14 @@ class UpdateChecker : public QObject {
 public:
   explicit UpdateChecker(HttpClient* http, QObject* parent = nullptr);
 
+  // Premiere verification tout de suite, puis environ toutes les 6 h. Apres un
+  // echec, reprise plus rapprochee et bornee : une panne au demarrage n'attend
+  // pas 6 h. Une seule requete a la fois, jamais de reentrance.
   void start();
+  // Fin definitive : plus aucune requete ni reponse traitee (sortie d'OBS).
+  void stop();
   // Redemande le manifeste tout de suite, hors du rythme du timer (version
-  // bloquee, manifeste pas encore arrive).
+  // bloquee, manifeste pas encore arrive). Sans effet si une requete est en vol.
   void check();
 
 signals:
@@ -78,12 +85,27 @@ signals:
                        const QString& downloadUrl,
                        const QString& notes,
                        const QString& severity);
+  // Manifeste SIGNE et valide dont la derniere version n'est pas plus recente que
+  // celle qui tourne. Seul signal qui autorise a retirer une offre : une panne, une
+  // signature fausse ou un contenu illisible n'emettent rien, l'etat ne bouge pas.
+  void noUpdateAvailable();
 
 private:
+  enum class CheckOutcome {
+    Verified,       // manifeste signe, valide : la reprise repart de zero
+    Failed,         // reseau, statut, signature, contenu : nouvel essai bientot
+    FailedNoRetry,  // reessayer ne changerait rien : cycle normal
+  };
+
+  CheckOutcome handleManifest(const HttpResponse& res, const QJsonDocument& doc);
+  void scheduleNext(CheckOutcome outcome);
   static bool isNewer(const QString& candidate, const QString& current);
 
   HttpClient* http_;
   QTimer* timer_;
+  bool inFlight_ = false;
+  bool stopped_ = false;
+  int failures_ = 0;
 };
 
 } // namespace semirprod

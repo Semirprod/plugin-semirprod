@@ -31,7 +31,7 @@ updates itself; please update before reporting.
 ## Scope
 
 In scope: the plugin code in this repository and the release packages built
-from it (Windows installer and zip, macOS package, Linux archive).
+from it (Windows installer, macOS package, Linux archive).
 
 The Semirprod online service (website, dashboard, APIs) is out of scope for
 this repository, but reports about it are welcome at the same address.
@@ -40,7 +40,8 @@ this repository, but reports about it are welcome at the same address.
 
 Release binaries are built by the public workflow
 [`.github/workflows/release.yml`](.github/workflows/release.yml) from the tagged
-commit, and published with their SHA-256 checksums (`SHA256SUMS.txt`) and the
+commit. They are downloaded from a Semirprod account, not from this repository;
+each release here carries their SHA-256 checksums (`SHA256SUMS.txt`) and the
 complete source archive. Signing credentials are only available to jobs that
 run for an approved release tag, never to pull requests or forks.
 

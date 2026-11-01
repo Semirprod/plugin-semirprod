@@ -29,7 +29,49 @@
         </allowed-os-versions>
     </volume-check>
 
-    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <!-- require-scripts passe a true : avec false, Installer n'evalue aucun
+         JavaScript, et l'installation-check ci-dessous serait ignoree. -->
+    <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64"/>
+
+    <!-- OBS ouvert = peut-etre un direct en cours. Meme regle que l'installeur
+         Windows : on refuse, on ne ferme rien, et rien n'est touche.
+
+         Pas de <must-close> : Installer proposerait de fermer OBS lui-meme, donc
+         de couper un direct d'un clic. Pas de system.run non plus : il exige
+         allow-external-scripts, qui affiche un avertissement a l'utilisateur.
+
+         Ce controle sert a donner un message lisible, il n'est PAS la garantie :
+         il ne tourne qu'a l'ouverture du paquet (OBS peut etre lance ensuite), et
+         l'API peut ne rien voir selon la session (sudo installer). La garantie est
+         le preinstall, qui s'execute au moment d'installer.
+
+         Toute erreur de l'API laisse donc passer : le preinstall tranche. -->
+    <installation-check script="obsIsClosed();"/>
+    <script>
+    <![CDATA[
+    function obsText(key, fallback) {
+        var value = system.localizedString(key);
+        return (value && value !== key) ? value : fallback;
+    }
+    function obsIsClosed() {
+        var running = null;
+        try {
+            running = system.applications.fromIdentifier('com.obsproject.obs-studio');
+        } catch (e) {
+            return true;
+        }
+        // Tableau d'applications selon les versions de macOS, ou objet seul.
+        if (running && (running.length === undefined || running.length > 0)) {
+            my.result.type = 'Fatal';
+            my.result.title = obsText('OBS_RUNNING_TITLE', 'OBS');
+            my.result.message = obsText('OBS_RUNNING_MESSAGE',
+                'OBS est ouvert. Ferme-le avant d\'installer. / OBS is open. Close it before installing.');
+            return false;
+        }
+        return true;
+    }
+    ]]>
+    </script>
 
     <!-- Logo Semirprod, en bas a gauche du panneau.
          `scaling="none"` parce que l'image est deja generee a la bonne taille
