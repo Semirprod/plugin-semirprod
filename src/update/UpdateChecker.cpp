@@ -556,6 +556,15 @@ void UpdateChecker::scheduleNext(CheckOutcome outcome) {
   // Seul un manifeste verifie remet la reprise a zero. Un 404 ne prouve rien sur
   // le chemin de confiance : il suit le cycle normal sans effacer le compteur.
   if (outcome == CheckOutcome::Verified) failures_ = 0;
+#ifdef SEMIRPROD_DEV_BUILD
+  // Build de test seulement, absent d'un binaire de release : rejouer un retrait
+  // ou une levee de pause sans attendre le cycle de 6 h.
+  const int testIntervalS = qEnvironmentVariableIntValue("SEMIRPROD_TEST_UPDATE_INTERVAL_S");
+  if (testIntervalS > 0 && testIntervalS < 86400) {
+    timer_->start(testIntervalS * 1000);
+    return;
+  }
+#endif
   timer_->start(withJitter(kCheckIntervalMs, kCheckJitterMs, draw));
 }
 
