@@ -17,18 +17,29 @@ Semirprod service; it does nothing on its own.
 
 ## Install
 
-Official builds are distributed from [semirprod.fr](https://semirprod.fr).
-Every release of this repository also carries its binaries, a
-`SHA256SUMS.txt` file and the complete source archive.
+Official builds are downloaded from your Semirprod account, on
+[semirprod.fr](https://semirprod.fr). Every release of this repository carries
+the complete source archive and a `SHA256SUMS.txt` file with the checksums of
+the installers; it carries no binary.
 
 | Platform | File |
 |---|---|
-| Windows | `semirprod-plugin-installer-<version>.exe` (installer) or `obs-semirprod-plugin-v<version>.zip` (drop `obs-plugins` into the OBS folder) |
-| macOS | `semirprod-plugin-<version>.pkg`, signed and notarized |
+| Windows | `semirprod-plugin-installer-<version>.exe`. Refuses to install while OBS is open |
+| macOS | `semirprod-plugin-<version>.pkg`, signed and notarized. Refuses to install while OBS is open |
 | Linux | `obs-semirprod-plugin-v<version>-linux-x86_64.tar.gz`, extract into `~/.config/obs-studio/plugins/` |
 
 Detailed steps: [`docs/INSTALLATION.md`](docs/INSTALLATION.md) (Windows) and
 [`docs/INSTALLATION-macos.md`](docs/INSTALLATION-macos.md) (macOS), in French.
+
+## Updates
+
+The plugin never installs anything by itself: an open OBS may be live on air.
+It checks a signed manifest when its dock loads, then about every 6 hours, and
+sooner after a failed check. A version that stops being offered also disappears
+from the plugin, without restarting OBS. A critical update pauses remote control
+until it is installed, never during a stream or a recording, and remote control
+comes back on its own if the update stops being critical. When there is nothing
+newer to offer, the update button opens the download page of your account.
 
 ## Build from source
 
@@ -94,6 +105,9 @@ set "SEMIRPROD_SKIP_OBS_COPY=1"
 build_plugin.bat
 rem -> obs-semirprod-plugin-v<version>.zip and semirprod-plugin-installer-<version>.exe
 ```
+
+The Windows zip is for your own builds: with OBS closed, extract its `obs-plugins`
+and `data` folders into the OBS folder.
 
 Each script lists at its top every variable it accepts.
 
@@ -176,11 +190,16 @@ Security issues: see [`SECURITY.md`](SECURITY.md). Do not open a public issue.
 de bord Semirprod. Il faut un compte Semirprod et OBS Studio 32.0 ou plus
 récent.
 
-Les versions officielles se téléchargent sur [semirprod.fr](https://semirprod.fr).
-Chaque version publiée ici contient aussi les binaires, leurs empreintes
-(`SHA256SUMS.txt`) et l'archive complète du code source. Installation :
+Les versions officielles se téléchargent depuis ton compte, sur
+[semirprod.fr](https://semirprod.fr). Chaque version publiée ici contient
+l'archive complète du code source et les empreintes des installeurs
+(`SHA256SUMS.txt`), sans aucun binaire. Installation :
 [`docs/INSTALLATION.md`](docs/INSTALLATION.md) (Windows) et
 [`docs/INSTALLATION-macos.md`](docs/INSTALLATION-macos.md) (macOS).
+
+Mises à jour : le plugin n'installe jamais rien seul, car un OBS ouvert est
+peut-être en direct, et les installeurs refusent de s'exécuter tant qu'OBS est
+ouvert. Voir « Updates » ci-dessus.
 
 Sauvegardes de collections : la configuration des modules de plugins tiers
 n'est pas restaurée à l'import, même depuis ta propre sauvegarde (voir « Scene

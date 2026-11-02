@@ -82,6 +82,9 @@ signals:
   void deviceFlowSucceeded(const semirprod::TokenBundle& bundle);
   void deviceFlowFailed(const QString& errorMessage);
 
+  /** Le jeton de rafraîchissement vient de tourner : à enregistrer tout de suite. */
+  void refreshRotated(const semirprod::TokenBundle& bundle);
+
   // La session stockee est DEFINITIVEMENT morte : jeton de rafraichissement
   // revoque, expire, ou emis par un autre environnement. A distinguer de
   // deviceFlowFailed, qui couvre les pannes passageres (reseau coupe, 5xx) ou

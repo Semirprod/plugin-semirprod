@@ -6,15 +6,27 @@
 #
 # Tag v<version> pushed to Semirprod/plugin-semirprod: the same builds, then
 #   - macOS: Developer ID signature, notarization, stapling (job "macos-signed");
-#   - a DRAFT GitHub Release with every binary, the source archive and
-#     SHA256SUMS.txt (job "publish");
+#   - a DRAFT GitHub Release with the source archive and SHA256SUMS.txt, and no
+#     binary: downloads go through the Semirprod account (job "publish");
 #   - each installer uploaded as a DRAFT to Semirprod. Nothing reaches users
-#     until a draft is promoted by hand.
+#     until a draft is promoted by hand;
+#   - this run's build artifacts deleted once published (job "staging-cleanup").
+# Push to the branch "staging": the same pipeline as a TEST build. Its plugin
+# accepts pre-production servers, so it never reaches users: no GitHub Release,
+# and its files go only to the pre-production admin, then are deleted from the
+# run. Its server settings live in the GitHub environment "staging".
+#
 # Both jobs are bound to the GitHub environment "release": they wait for an
 # approval, and only they can read its secrets. That environment, and every
 # secret below (signing material and SEMIRPROD_RELEASE_UPLOAD_TOKEN), lives in
 # THIS public repository (Semirprod/plugin-semirprod), not in any private
 # Semirprod repository: the workflow that reads them is this one.
+#
+# Build artifacts are kept 1 day on every path, because this repository is
+# public. On a tag, windows and linux finish before macos-signed starts, and
+# publish starts after it: both approvals of the "release" environment and the
+# macOS build between them must fit within that day, or the run must be started
+# again to rebuild them.
 #
 # Runner images are pinned on purpose:
 #   windows-2022  Visual Studio 2022 and Windows SDK 10.0.22621, the toolchain of
@@ -42,7 +54,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
     tags: ['v*']
   pull_request:
     branches: [main]
@@ -58,9 +70,6 @@ defaults:
   run:
     shell: bash
 
-env:
-  SEMIRPROD_RELEASE_DRAFTS_URL: ${{ vars.SEMIRPROD_RELEASE_DRAFTS_URL || 'https://admin.semirprod.fr/api/admin/plugin/release-drafts' }}
-
 jobs:
   meta:
     name: Version
@@ -69,6 +78,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
+      staging: ${{ steps.version.outputs.staging }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,9 +106,15 @@ jobs:
               release=true
             fi
           fi
+          # Same rule: a fork's "staging" branch is an ordinary build.
+          staging=false
+          if [ "$GITHUB_REF" = "refs/heads/staging" ] && [ "$GITHUB_REPOSITORY" = "Semirprod/plugin-semirprod" ]; then
+            staging=true
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release=$release" >> "$GITHUB_OUTPUT"
-          echo "version $version, release=$release"
+          echo "staging=$staging" >> "$GITHUB_OUTPUT"
+          echo "version $version, release=$release, staging=$staging"
 
   windows:
     name: Windows x64
@@ -143,11 +159,23 @@ jobs:
           "QT_DIR=$qtDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Qt $qtVer from obs-deps"
 
+      - name: Hosts of the test build
+        if: needs.meta.outputs.staging == 'true'
+        shell: bash
+        env:
+          SEMIRPROD_DEV_HOSTS: ${{ secrets.SEMIRPROD_DEV_HOSTS }}
+        run: |
+          set -euo pipefail
+          [ -n "$SEMIRPROD_DEV_HOSTS" ] || { echo "::error::secret SEMIRPROD_DEV_HOSTS missing"; exit 1; }
+          mkdir -p tools
+          printf '%s\n' "$SEMIRPROD_DEV_HOSTS" | tr ',' '\n' > tools/dev-hosts.txt
+
       - name: Build plugin, zip and installer
         shell: pwsh
         env:
           SEMIRPROD_SKIP_OBS_COPY: '1'
-          SEMIRPROD_DEV_BUILD_FLAG: '0'
+          SEMIRPROD_DEV_BUILD_FLAG: ${{ needs.meta.outputs.staging == 'true' && '1' || '0' }}
+          SEMIRPROD_DEV_INSTALLER: '1'
         run: |
           # The script ends on `pause`: stdin from NUL lets it return.
           cmd /d /c "build_plugin.bat < NUL"
@@ -171,11 +199,18 @@ jobs:
         shell: pwsh
         run: throw "Authenticode signing is not configured"
 
+      # The zip stays a local build output (build_plugin.bat fails if it cannot
+      # write it): no job publishes it, so it does not leave this runner.
       - name: Collect artifacts
         shell: pwsh
+        env:
+          STAGING_BUILD: ${{ needs.meta.outputs.staging }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @("semirprod-plugin-installer-$env:VERSION.exe", "obs-semirprod-plugin-v$env:VERSION.zip")
+          $files = @("semirprod-plugin-installer-$env:VERSION.exe")
+          # Test build only: the module alone goes into a portable OBS, without
+          # installing over the OBS of the test machine. Removed with the run's files.
+          if ($env:STAGING_BUILD -eq 'true') { $files += "obs-semirprod-plugin-v$env:VERSION-DEV-staging.zip" }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           foreach ($f in $files) {
             if (-not (Test-Path $f)) { throw "expected artifact missing: $f" }
@@ -188,7 +223,7 @@ jobs:
           name: windows
           path: out/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   linux:
     name: Linux x86_64
@@ -197,6 +232,7 @@ jobs:
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.meta.outputs.version }}
+      DEV_SUFFIX: ${{ needs.meta.outputs.staging == 'true' && '-DEV-staging' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -205,9 +241,21 @@ jobs:
       - name: Prepare OBS SDK (libobs + obs-frontend-api, OBS 32.0)
         run: bash .github/scripts/prepare-obs-sdk.sh --install-deps
 
+      - name: Hosts of the test build
+        if: needs.meta.outputs.staging == 'true'
+        shell: bash
+        env:
+          SEMIRPROD_DEV_HOSTS: ${{ secrets.SEMIRPROD_DEV_HOSTS }}
+        run: |
+          set -euo pipefail
+          [ -n "$SEMIRPROD_DEV_HOSTS" ] || { echo "::error::secret SEMIRPROD_DEV_HOSTS missing"; exit 1; }
+          mkdir -p tools
+          printf '%s\n' "$SEMIRPROD_DEV_HOSTS" | tr ',' '\n' > tools/dev-hosts.txt
+
       - name: Build plugin (public edition)
         env:
           OBS_USER_PLUGINS: ${{ runner.temp }}/obs-user-plugins
+          SEMIRPROD_DEV_BUILD_FLAG: ${{ needs.meta.outputs.staging == 'true' && '1' || '0' }}
         run: bash build_plugin.sh --edition public
 
       - name: Check the module and collect the archive
@@ -217,7 +265,7 @@ jobs:
           # libobs rejects a module without these exports, with no detail.
           nm -D --defined-only "$so" | grep -qE ' obs_module_load$' \
             || { echo "::error::obs_module_load is not exported"; exit 1; }
-          tarball="obs-semirprod-plugin-v$VERSION-linux-x86_64.tar.gz"
+          tarball="obs-semirprod-plugin-v$VERSION-linux-x86_64$DEV_SUFFIX.tar.gz"
           test -f "$tarball" || { echo "::error::expected artifact missing: $tarball"; exit 1; }
           mkdir -p out && cp "$tarball" out/
           sha256sum out/*
@@ -227,14 +275,14 @@ jobs:
           name: linux
           path: out/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   # Pull requests, main, forks: same build, ad-hoc signature, unsigned .pkg.
   # It needs no secret and cannot fail for lack of one.
   macos:
     name: macOS universal (unsigned)
     needs: meta
-    if: needs.meta.outputs.release != 'true'
+    if: needs.meta.outputs.release != 'true' && needs.meta.outputs.staging != 'true'
     runs-on: macos-15
     timeout-minutes: 120
     env:
@@ -266,13 +314,13 @@ jobs:
           name: macos-unsigned
           path: out/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
   # Official tags only. Waits for approval on the "release" environment.
   macos-signed:
     name: macOS universal (signed, notarized)
     needs: meta
-    if: needs.meta.outputs.release == 'true'
+    if: needs.meta.outputs.release == 'true' || needs.meta.outputs.staging == 'true'
     runs-on: macos-15
     timeout-minutes: 150
     environment: release
@@ -382,9 +430,21 @@ jobs:
       # hardened runtime and a secure timestamp (cmake/macos/embed_tls_backend.cmake).
       # INSTALLER_IDENTITY: productbuild signs the .pkg (packaging/macos/build_pkg.sh).
       # Notarization runs in the next step, not in build_pkg.sh.
+      - name: Hosts of the test build
+        if: needs.meta.outputs.staging == 'true'
+        shell: bash
+        env:
+          SEMIRPROD_DEV_HOSTS: ${{ secrets.SEMIRPROD_DEV_HOSTS }}
+        run: |
+          set -euo pipefail
+          [ -n "$SEMIRPROD_DEV_HOSTS" ] || { echo "::error::secret SEMIRPROD_DEV_HOSTS missing"; exit 1; }
+          mkdir -p tools
+          printf '%s\n' "$SEMIRPROD_DEV_HOSTS" | tr ',' '\n' > tools/dev-hosts.txt
+
       - name: Build, sign plugin and package
         env:
           OBS_USER_PLUGINS: ${{ runner.temp }}/obs-user-plugins
+          SEMIRPROD_DEV_BUILD_FLAG: ${{ needs.meta.outputs.staging == 'true' && '1' || '0' }}
         run: bash build_plugin_macos.sh
 
       - name: Verify code signature
@@ -406,6 +466,15 @@ jobs:
             | grep -q 'signed by a developer certificate issued by Apple for distribution' \
             || { echo "::error::package not signed with a Developer ID Installer certificate"; exit 1; }
           echo "bundle and package signatures OK"
+
+      # GitHub's macOS runners drop stapler's HTTP/3 (UDP 443) connections to Apple
+      # after about 7 s. Without UDP, stapler falls back to HTTPS over TCP, which
+      # works. Workaround given by GitHub: remove once actions/runner-images#14924
+      # is fixed.
+      - name: Block outbound UDP 443 (actions/runner-images#14924)
+        run: |
+          echo "block return out quick proto udp from any to any port 443" | sudo pfctl -f -
+          sudo pfctl -E
 
       - name: Notarize and staple
         env:
@@ -434,9 +503,26 @@ jobs:
             exit 1
           fi
           # Stapling puts the ticket in the file: installation then works
-          # offline too.
-          xcrun stapler staple "$pkg"
-          xcrun stapler validate "$pkg"
+          # offline too. Stapling fetches the ticket from Apple's CDN: a lost
+          # connection or a ticket not yet published must not waste an accepted
+          # notarization, so it is retried.
+          stapled=false
+          for attempt in 1 2 3 4 5 6; do
+            if xcrun stapler staple "$pkg"; then stapled=true; break; fi
+            echo "stapling attempt $attempt failed, retrying in 30 s"
+            sleep 30
+          done
+          [ "$stapled" = true ] || { echo "::error::stapling failed after 6 attempts"; exit 1; }
+          # validate also queries Apple over the network. A lost connection here
+          # says nothing about the file: the next step checks the stapled ticket
+          # itself (spctl, pkgutil), and that check is the one that can fail the job.
+          validated=false
+          for attempt in 1 2 3 4 5 6; do
+            if xcrun stapler validate "$pkg"; then validated=true; break; fi
+            echo "validation attempt $attempt failed, retrying in 30 s"
+            sleep 30
+          done
+          [ "$validated" = true ] || echo "::warning::stapler validate unavailable, relying on the Gatekeeper step"
 
       - name: Gatekeeper verdict
         run: |
@@ -461,20 +547,22 @@ jobs:
           name: macos
           path: out/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
-  # Official tags only. Waits for approval on the "release" environment.
+  # Official tags wait for approval on the "release" environment. The "staging"
+  # branch uses the "staging" environment: only its server and its token differ.
   publish:
     name: Draft releases
     needs: [meta, windows, linux, macos-signed]
-    if: needs.meta.outputs.release == 'true'
+    if: needs.meta.outputs.release == 'true' || needs.meta.outputs.staging == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: release
+    environment: ${{ needs.meta.outputs.staging == 'true' && 'staging' || 'release' }}
     permissions:
       contents: write
     env:
       VERSION: ${{ needs.meta.outputs.version }}
+      DEV_SUFFIX: ${{ needs.meta.outputs.staging == 'true' && '-DEV-staging' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -486,27 +574,34 @@ jobs:
           merge-multiple: true
 
       - name: Check artifacts, add source archive and checksums
+        if: needs.meta.outputs.release == 'true'
         run: |
           set -euo pipefail
-          expected=(
+          # What users can download from their Semirprod account.
+          installers=(
             "semirprod-plugin-installer-$VERSION.exe"
-            "obs-semirprod-plugin-v$VERSION.zip"
             "semirprod-plugin-$VERSION.pkg"
             "obs-semirprod-plugin-v$VERSION-linux-x86_64.tar.gz"
           )
-          for f in "${expected[@]}"; do
+          for f in "${installers[@]}"; do
             test -f "dist/$f" || { echo "::error::missing artifact: $f"; exit 1; }
           done
-          if [ "$(find dist -maxdepth 1 -type f | wc -l)" -ne "${#expected[@]}" ]; then
+          if [ "$(find dist -maxdepth 1 -type f | wc -l)" -ne "${#installers[@]}" ]; then
             echo "::error::unexpected files in the build output"; ls -la dist; exit 1
           fi
+          # Everything the draft release carries goes in its own folder: no binary
+          # can reach it by accident. dist/ stays as it is for the upload step.
+          mkdir release-assets
           # Complete corresponding source (GPL): this repository at the tag.
+          source_archive="obs-semirprod-plugin-v$VERSION-source.tar.gz"
           git archive --format=tar.gz --prefix="obs-semirprod-plugin-v$VERSION-source/" \
-            -o "dist/obs-semirprod-plugin-v$VERSION-source.tar.gz" "$GITHUB_SHA"
-          (cd dist && sha256sum -- * > SHA256SUMS.txt)
-          cat dist/SHA256SUMS.txt
+            -o "release-assets/$source_archive" "$GITHUB_SHA"
+          (cd dist && sha256sum -- "${installers[@]}") > release-assets/SHA256SUMS.txt
+          (cd release-assets && sha256sum -- "$source_archive") >> release-assets/SHA256SUMS.txt
+          cat release-assets/SHA256SUMS.txt
 
       - name: Create or update the GitHub draft release
+        if: needs.meta.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -519,20 +614,29 @@ jobs:
               echo "::error::release $TAG is already published; its files are not replaced"
               exit 1
             fi
-            gh release upload "$TAG" dist/* --clobber
+            gh release upload "$TAG" release-assets/* --clobber
+            # A draft made before this rule may still carry binaries.
+            gh release view "$TAG" --json assets --jq '.assets[].name' \
+              | while IFS= read -r name; do
+                  case "$name" in
+                    "obs-semirprod-plugin-v$VERSION-source.tar.gz"|SHA256SUMS.txt) ;;
+                    *) gh release delete-asset "$TAG" "$name" --yes ;;
+                  esac
+                done
           else
-            gh release create "$TAG" dist/* --draft --verify-tag \
+            gh release create "$TAG" release-assets/* --draft --verify-tag \
               --title "Semirprod for OBS $VERSION" \
-              --notes "Built from $TAG ($GITHUB_SHA). Verify downloads against SHA256SUMS.txt. The source archive is the complete corresponding source of these binaries (GPL-2.0-or-later)."
+              --notes "Built from $TAG ($GITHUB_SHA). Installers are downloaded from a Semirprod account; verify them against SHA256SUMS.txt. The source archive is their complete corresponding source (GPL-2.0-or-later)."
           fi
 
       - name: Upload drafts to Semirprod
         env:
           SEMIRPROD_RELEASE_UPLOAD_TOKEN: ${{ secrets.SEMIRPROD_RELEASE_UPLOAD_TOKEN }}
+          SEMIRPROD_RELEASE_DRAFTS_URL: ${{ vars.SEMIRPROD_RELEASE_DRAFTS_URL || 'https://admin.semirprod.fr/api/admin/plugin/release-drafts' }}
         run: |
           set -euo pipefail
           if [ -z "${SEMIRPROD_RELEASE_UPLOAD_TOKEN:-}" ]; then
-            echo "::error::SEMIRPROD_RELEASE_UPLOAD_TOKEN missing in environment 'release'"
+            echo "::error::SEMIRPROD_RELEASE_UPLOAD_TOKEN missing in this environment"
             exit 1
           fi
           umask 077
@@ -574,5 +678,41 @@ jobs:
           rc=0
           upload windows "dist/semirprod-plugin-installer-$VERSION.exe" || rc=1
           upload macos "dist/semirprod-plugin-$VERSION.pkg" || rc=1
-          upload linux "dist/obs-semirprod-plugin-v$VERSION-linux-x86_64.tar.gz" || rc=1
+          upload linux "dist/obs-semirprod-plugin-v$VERSION-linux-x86_64$DEV_SUFFIX.tar.gz" || rc=1
           exit "$rc"
+
+  # Staging and official tags only: their builds do not stay downloadable from
+  # this public repository once this job has run. Pull requests, main and forks
+  # keep theirs until the 1-day retention ends. It runs after publish, which has
+  # downloaded and uploaded its files by then.
+  #
+  # Test build: always deleted, even after a failure. A re-run rebuilds it.
+  #
+  # Official tag: deleted only once publish has succeeded. Deleting after a failed
+  # upload would make "Re-run failed jobs" impossible: the signed, notarized .pkg
+  # would be gone, and only a full re-run (an hour or more, new binaries, new
+  # checksums) could retry. The cost of keeping them is that a failed run stays
+  # downloadable until its 1-day retention ends, the same exposure as while the
+  # run waits for approval. Without a re-run within that day, a full re-run is
+  # needed anyway. The re-run of the failed jobs comes back here and deletes them.
+  staging-cleanup:
+    name: Remove build files
+    needs: [meta, windows, linux, macos-signed, publish]
+    if: ${{ always() && (needs.meta.outputs.staging == 'true' || (needs.meta.outputs.release == 'true' && needs.publish.result == 'success')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete this run's artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].id' \
+            | while read -r id; do
+                gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$id"
+                echo "deleted artifact $id"
+              done

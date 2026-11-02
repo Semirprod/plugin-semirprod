@@ -104,6 +104,11 @@ public:
   /// interactif tourne.
   void onExternalTokenStored();
   void disconnectAccount();
+  void stopSessionWork();
+  void onPublishState(const QString& id, bool pub, bool synced);
+  void armInitialFetchRetry();
+  void onPublishRecheck();
+  void stopPublishRecheck();
   // Efface la liaison locale (trousseau, client live) sans rien demander au
   // serveur : suite d'un retrait, ou d'un refus definitif du poste.
   void clearLocalBinding();
@@ -541,6 +546,9 @@ private:
   QString pendingUpdateVersion_;
   QString pendingUpdateSeverity_;
   QString pendingUpdateNotes_;
+  // Manifeste signe : plus rien de plus recent. Retire l'offre (popup et bandeau)
+  // sans attendre un redemarrage d'OBS.
+  void clearPendingUpdate();
   // Popup native de mise a jour, sur la fenetre d'OBS : visible meme quand le
   // Studio n'est pas ouvert. « Me rappeler plus tard » = pas avant 24 h
   // (Settings::snoozeUpdate) ; « Ne plus me rappeler » = cette version, dans
@@ -554,22 +562,35 @@ private:
   QPointer<QMessageBox> updatePrompt_;
   void maybePromptUpdate();
   // Pause : version bloquee par le serveur ou mise a jour critique. La liaison
-  // est coupee pour de bon (LiveClient::halt), une popup propose la mise a jour
-  // avec « Plus tard » pour seul autre choix, et revient au prochain lancement.
+  // est coupee (LiveClient::halt), une popup propose la mise a jour avec « Plus
+  // tard » pour seul autre choix, et revient au prochain lancement.
   bool pluginBlocked_ = false;
-  // Pourquoi : faille de securite (refus serveur) ou mise a jour obligatoire
-  // (manifeste critique). Le texte de la popup et du bandeau en depend.
-  enum class BlockReason { Security, UpdateRequired };
+  // Pourquoi, et donc qui peut lever la pause. Security et UpdateRequired sont
+  // des refus du SERVEUR : un manifeste n'a pas a les contredire, le serveur
+  // refuserait de nouveau a la reconnexion. ManifestCritical vient du manifeste
+  // signe, et un manifeste signe peut la lever (maybeLiftUpdatePause).
+  enum class BlockReason { Security, UpdateRequired, ManifestCritical };
   BlockReason blockReason_ = BlockReason::Security;
   bool blockedPromptShown_ = false;
+  QPointer<QMessageBox> blockedPrompt_;
+  // Pause venue du manifeste, que le dernier manifeste signe ne justifie plus.
+  // Lue dans l'etat de l'offre (seul un manifeste verifie l'ecrit) : un retour en
+  // critique pendant l'attente annule donc la levee sans rien avoir a defaire.
+  bool updatePauseNoLongerJustified() const;
+  // Rend le pilotage sans redemarrer OBS. Jamais pendant un direct ou un
+  // enregistrement : reprise a l'arret, comme l'entree en pause.
+  void maybeLiftUpdatePause();
   // Acces au direct refuse : UNE popup par session d'OBS, jamais a chaque
   // verification (le plugin 0.1.5 en ouvrait une a chaque reconnexion).
   bool accessDeniedPromptShown_ = false;
   bool lastAccessDeniedLogged_ = false;
   void maybePromptAccessDenied();
-  bool openUpdateWhenKnown_ = false;
   void enterPluginBlocked(BlockReason reason = BlockReason::Security);
   void showBlockedPrompt();
+  // Le texte de la popup de pause suit l'etat courant. Pause devenue sans objet :
+  // une popup ouverte se retire, sans en rouvrir une par dessus un direct.
+  void applyBlockedPromptText(QMessageBox* box) const;
+  void refreshBlockedPrompt();
   // Studio paywall — GET /api/live/access dit si le compte peut passer en
   // direct (abonnement absent / expiré). L'interface web le rend depuis
   // studioAccess / studioAccessKnown / studioReason ; le dock ne porte plus
@@ -601,6 +622,11 @@ private:
   // de `register_instance_result`. Remplace le double appel « loadToken puis
   // connexion WS » a moins de 10 s d'intervalle.
   QTimer* initialFetchTimer_ = nullptr;
+  // Rien n'a encore été lu dans cette session : sans ces essais, un OBS lancé
+  // pendant une panne restait sans flux une fois le serveur revenu.
+  QTimer* initialFetchRetryTimer_ = nullptr;
+  int initialFetchRetryMs_ = 5000;
+  bool initialDataLoaded_ = false;
   // Nom de l'espace pousse par le serveur (instantane, `org_renamed`). Prime
   // sur celui du jeton, fige a l'appairage.
   QString serverOrgName_;
@@ -632,6 +658,13 @@ private:
   QString lastSourceStateActiveScene_;
   QString lastSourceStateSourceScene_;
   bool lastPublishing_ = false;
+  // La scène Bug vient d'une dégradation : le retour à la normale peut avoir eu
+  // lieu pendant une coupure de la liaison, et cet événement est alors perdu.
+  bool flippedToBugForQuality_ = false;
+  // « Plus de publication » relu au retour de la liaison, source encore vivante :
+  // on surveille la source au lieu de croire un état peut-être périmé.
+  QTimer* publishRecheckTimer_ = nullptr;
+  QString publishRecheckStreamId_;
   // Latches the "incoming feed above 1080p" operator notice so the 200 ms
   // source-panel poll surfaces it once, not every tick. Cleared when the feed
   // is no longer oversize so a later oversize stream notifies again.

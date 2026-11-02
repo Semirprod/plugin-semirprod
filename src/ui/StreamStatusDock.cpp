@@ -186,6 +186,8 @@ StreamStatusDock::StreamStatusDock(SemirprodDock* dock, LiveClient* live,
             this, &StreamStatusDock::onConnectionChanged);
     connect(live_, &LiveClient::publishStateChanged,
             this, &StreamStatusDock::onPublishStateChanged);
+    connect(live_, &LiveClient::publishStateSynced,
+            this, &StreamStatusDock::onPublishStateChanged);
   }
   if (dock) {
     connect(dock, &SemirprodDock::stateChanged,

@@ -426,7 +426,11 @@ if not defined ISCC_EXE if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set
 if not defined ISCC_EXE if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC_EXE=%ProgramFiles%\Inno Setup 6\ISCC.exe"
 
 set "INSTALLER_PATH="
-if "%SEMIRPROD_DEV_BUILD_FLAG%"=="1" (
+rem SEMIRPROD_DEV_INSTALLER=1 : la CI du depot public en fabrique un pour tester
+rem installation et mise a jour sur staging. Il ne part que vers l admin de staging.
+set "SKIP_DEV_INSTALLER=0"
+if "%SEMIRPROD_DEV_BUILD_FLAG%"=="1" if not "%SEMIRPROD_DEV_INSTALLER%"=="1" set "SKIP_DEV_INSTALLER=1"
+if "%SKIP_DEV_INSTALLER%"=="1" (
     echo [INFO] Build DEV : installeur non fabrique ^(il ne doit pas etre publie^).
 ) else if defined ISCC_EXE (
     echo [INFO] Fabrication de l'installeur avec "%ISCC_EXE%"...

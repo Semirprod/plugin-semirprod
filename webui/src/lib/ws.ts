@@ -150,6 +150,8 @@ export interface PluginState {
   /** Mode securite : version bloquee par le serveur, pilotage coupe. Absent
    *  d'un plugin anterieur a 0.2.3. */
   pluginBlocked?: boolean;
+  /** Pause que le manifeste ne justifie plus : levee a la fin du direct en cours. */
+  pluginBlockLiftPending?: boolean;
   pluginBlockReason?: 'security' | 'update_required';
   /** Identite du compte lie, renseignee APRES l'appairage. */
   accountName: string;

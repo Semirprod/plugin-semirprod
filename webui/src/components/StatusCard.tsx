@@ -30,10 +30,11 @@ function linksFor(s: PluginState, t: TFunction): Link[] {
     backend.hint = t('connections.link.pairingHint');
     backend.tone = 'warning';
     backend.pulse = true;
-  } else if (s.connected) {
+  } else if (s.connected && !s.pluginBlocked) {
     backend.value = t('connections.link.interrupted');
     backend.hint = t('connections.link.interruptedHint');
-    backend.tone = 'danger';
+    backend.tone = 'warning';
+    backend.pulse = true;
   }
 
   const source: Link = s.sourceReady

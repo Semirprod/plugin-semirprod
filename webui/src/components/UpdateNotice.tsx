@@ -21,6 +21,14 @@ export function UpdateNotice({ state, send }: Props) {
   const t = useT();
   const version = state.updateVersion.trim();
 
+  if (state.pluginBlocked && state.pluginBlockLiftPending) {
+    return (
+      <div className="rounded-lg border border-border p-3.5 text-sm font-medium">
+        {t('update.resumesAfterLive')}
+      </div>
+    );
+  }
+
   if (state.pluginBlocked) {
     const update = state.pluginBlockReason === 'update_required';
     return (

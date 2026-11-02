@@ -85,6 +85,10 @@ ditto "$BUNDLE_PATH" "$PAYLOAD/$BUNDLE_NAME" || die "copie du bundle echouee."
 RESOURCES="$STAGING/resources"
 mkdir -p "$RESOURCES"
 cp "$HERE/resources/"*.html "$RESOURCES/" 2>/dev/null
+# Textes du JavaScript de distribution.xml (system.localizedString), en francais
+# et en anglais. Les pages ci-dessus restent a la racine, communes aux deux.
+cp -R "$HERE/resources/"*.lproj "$RESOURCES/" \
+  || die "ressources localisees introuvables."
 
 LOGO="$ROOT/logo.png"
 if [ -f "$LOGO" ]; then

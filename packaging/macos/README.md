@@ -62,6 +62,20 @@ Les replis `/Library` et `bin/`+`data/` sont derrière `#ifndef __aarch64__`
 `currentUserHome` — qui, effet de bord bienvenu, n'exige aucun mot de passe
 administrateur.
 
+## OBS ouvert : l'installation est refusée
+
+Comme sous Windows : OBS ouvert peut vouloir dire un direct en cours, donc
+l'installeur refuse, ne ferme rien et ne touche à rien. Deux niveaux :
+
+* `distribution.xml`, `installation-check` : un message lisible à l'ouverture du
+  paquet (`system.applications.fromIdentifier`, textes dans
+  `resources/*.lproj/Localizable.strings`). Il exige `require-scripts="true"`.
+  Pas de `must-close`, qui proposerait de fermer OBS.
+* `scripts/preinstall` : la garantie. `pgrep` juste avant d'installer, sortie
+  non nulle avant de retirer l'ancien bundle. Il couvre un OBS lancé après
+  l'ouverture du paquet et `sudo installer`. Installer affiche alors son échec
+  générique, le motif est dans `/var/log/install.log`.
+
 ## Détails qui ont coûté du temps
 
 * **Xcode complet requis** pour configurer OBS (les Command Line Tools ne

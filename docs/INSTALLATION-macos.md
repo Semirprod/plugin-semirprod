@@ -10,7 +10,8 @@ Prérequis : **OBS Studio 32.0 ou plus récent**, **macOS 13 ou plus récent**.
 
 ## Installation
 
-1. **Ferme OBS.**
+1. **Ferme OBS.** S'il est ouvert, l'installation est refusée et rien n'est
+   modifié.
 2. Ouvre `semirprod-plugin-X.Y.Z.pkg`.
 3. Laisse-toi guider, puis **relance OBS**.
 

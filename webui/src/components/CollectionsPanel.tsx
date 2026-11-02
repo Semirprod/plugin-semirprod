@@ -178,7 +178,7 @@ export function CollectionsPanel({
   if (backupFeature && !backupFeature.allowed) {
     return (
       <Section title={t('collections.title')}>
-        <FeatureBlocked verdict={backupFeature} state={state} send={send} />
+        <FeatureBlocked verdict={backupFeature} send={send} />
       </Section>
     );
   }
@@ -498,7 +498,7 @@ export function CollectionsPanel({
         {etatImport}
 
         {groupes.length === 0 ? (
-          <Empty>{t('collections.noBackups')}</Empty>
+          <Empty>{t(quotaKnown ? 'collections.noBackups' : 'collections.backupsUnavailable')}</Empty>
         ) : (
           groupes.map(({ latest: item, count }) => (
             <NavRow

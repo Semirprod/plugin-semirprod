@@ -322,20 +322,17 @@ void DeviceAuthFlow::poll() {
 
 // Le serveur a-t-il REFUSE la session, ou n'a-t-il simplement pas repondu ?
 //
-// Un refus vient avec un statut HTTP : le point d'entree OAuth repond 400 avec
-// un champ `error` (RFC 6749 §5.2 — `invalid_grant` quand le jeton de
-// rafraichissement est revoque, expire, ou appartient a un autre client), 401
-// ou 403. Reessayer ne changera jamais rien.
+// Un jeton de rafraichissement n'est mort que si le point d'entree OAuth le DIT :
+// 4xx avec un code `error` de la RFC 6749 §5.2 (`invalid_grant` quand il est
+// revoque ou expire, `invalid_client` s'il appartient a un autre client).
 //
-// Tout le reste — statut 0 (rien recu), 5xx, 404 — est passager : reseau coupe,
-// serveur qui redemarre, proxy. Le plugin doit garder ses jetons et reessayer.
-//
-// On ne peut PAS se fier a `networkError == NoError` pour trancher : Qt pose une
-// erreur reseau sur tout 4xx. C'est le statut qui fait foi (mesure du 13 aout :
-// `status=400 err=302` sur un refresh refuse).
-static bool isDefinitiveAuthRefusal(const HttpResponse& response) {
-  return response.statusCode == 400 || response.statusCode == 401 ||
-         response.statusCode == 403;
+// Tout le reste est passager, 4xx sans ce code compris : un proxy ou un pod en
+// plein deploiement peut repondre 400 ou 403 sans rapport avec le jeton. Effacer
+// la liaison sur un simple statut obligeait a refaire l'appairage de tout le parc.
+static bool isDefinitiveRefreshRefusal(const HttpResponse& response, const QJsonDocument& json) {
+  if (response.statusCode < 400 || response.statusCode >= 500 || !json.isObject()) return false;
+  const QString code = json.object().value(QStringLiteral("error")).toString();
+  return code == QStringLiteral("invalid_grant") || code == QStringLiteral("invalid_client");
 }
 
 namespace {
@@ -425,7 +422,7 @@ void DeviceAuthFlow::refreshAccessToken(TokenBundle binding) {
         // doit rien enregistrer, sinon elle recreerait la liaison effacee.
         if (generation != generation_) return;
         if (!response.ok() || !json.isObject()) {
-          if (isDefinitiveAuthRefusal(response)) {
+          if (isDefinitiveRefreshRefusal(response, json)) {
             blog(LOG_WARNING,
                  "[semirprod-auth] refresh refuse definitivement (HTTP %d) — session perdue",
                  response.statusCode);
@@ -454,6 +451,7 @@ void DeviceAuthFlow::refreshAccessToken(TokenBundle binding) {
             obj.value(QStringLiteral("expires_in")).toInt(3600));
         binding.refreshToken =
             obj.value(QStringLiteral("refresh_token")).toString(pendingRefreshToken_);
+        emit refreshRotated(binding);
         openDeviceSession(binding, /*oauthJustRefreshed=*/true, generation);
       });
 }
@@ -495,8 +493,9 @@ void DeviceAuthFlow::openDeviceSession(TokenBundle binding, bool oauthJustRefres
             cancel();
             return;
           }
-          if (isTerminalSessionCode(code) ||
-              (oauthJustRefreshed && isDefinitiveAuthRefusal(response))) {
+          // Seul un code explicite du serveur est definitif, jamais un statut
+          // seul : le prochain essai repart du jeton enregistre par `refreshRotated`.
+          if (isTerminalSessionCode(code)) {
             blog(LOG_WARNING, "[semirprod-auth] session d'appareil refusee : %s (HTTP %d)",
                  code.toUtf8().constData(), response.statusCode);
             emit sessionRevoked(terminalRefusalText(code));

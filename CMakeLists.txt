@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(obs-semirprod-plugin
-  VERSION 0.2.4
+  VERSION 0.2.7
   LANGUAGES CXX
   DESCRIPTION "Semirprod for OBS — OBS plugin for live stream automation"
 )
