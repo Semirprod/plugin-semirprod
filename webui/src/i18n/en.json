@@ -79,8 +79,8 @@
   "connections.link.sessionActive": "active session",
   "connections.link.pairing": "Pairing…",
   "connections.link.pairingHint": "waiting for the browser",
-  "connections.link.interrupted": "Interrupted",
-  "connections.link.interruptedHint": "valid session, real time cut off",
+  "connections.link.interrupted": "Reconnecting…",
+  "connections.link.interruptedHint": "remote control will resume on its own",
   "connections.source": "Video source",
   "connections.source.live": "Live",
   "connections.source.waiting": "Waiting",
@@ -161,6 +161,7 @@
   "collections.unknownCollection": "Unknown collection",
   "collections.none": "No scene collection in this OBS.",
   "collections.noBackups": "No backup yet.",
+  "collections.backupsUnavailable": "Backup list unavailable for now.",
 
   "collections.phase.packaging": "Preparing{name}…{step}",
   "collections.phase.reserving": "Checking your storage…{step}",

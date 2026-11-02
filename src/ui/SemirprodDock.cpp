@@ -1252,6 +1252,9 @@ void SemirprodDock::bindSignals() {
     QDesktopServices::openUrl(QUrl(session.verificationUri));
   });
 
+  connect(authFlow_, &DeviceAuthFlow::refreshRotated, this,
+          [this](const TokenBundle& bundle) { tokenStore_->saveRotated(bundle); });
+
   connect(authFlow_, &DeviceAuthFlow::deviceFlowSucceeded, this, [this](const TokenBundle& bundle) {
     tokenStore_->save(bundle, [this](bool ok) {
       // NE PAS conditionner la suite a `ok` : `ok` ne dit QUE si le jeton a pu
@@ -1309,9 +1312,12 @@ void SemirprodDock::bindSignals() {
   // le coffre, coupe le client live (donc la boucle de reconnexion en 401), et
   // remet l'etat a zero. L'interface web retombe alors sur l'ecran d'appairage.
   connect(authFlow_, &DeviceAuthFlow::sessionRevoked, this, [this](const QString& reason) {
-    blog(LOG_WARNING, "[semirprod-dock] session revoquee — deconnexion et retour a l'appairage");
-    disconnectAccount();
-    // APRES disconnectAccount : il ecrit « Plugin deconnecte. », or ce qu'il
+    blog(LOG_WARNING, "[semirprod-dock] session revoquee — retour a l'appairage");
+    // Pas disconnectAccount() : ce geste-la retire le poste cote serveur. Un refus
+    // ne doit jamais declencher tout seul une ecriture definitive sur le serveur.
+    stopSessionWork();
+    clearLocalBinding();
+    // APRES clearLocalBinding : il ecrit « Plugin deconnecte. », or ce qu'il
     // faut lire ici c'est pourquoi.
     setStatus(reason);
     updateUiState();
@@ -1423,6 +1429,7 @@ void SemirprodDock::bindSignals() {
       return;
     }
     // device_revoked : la liaison locale ne sert plus à rien.
+    stopSessionWork();
     clearLocalBinding();
     setStatus(QStringLiteral("Ce poste a été retiré de ton espace Semirprod. Reconnecte ton compte."));
     updateUiState();
@@ -1431,25 +1438,10 @@ void SemirprodDock::bindSignals() {
   // LiveClient::wsTraffic n'a plus d'abonne : son unique lecteur etait le
   // journal de trames du dock, invisible. Les evenements metier, eux, partent
   // toujours par logEvent() vers le dock Journal et le log OBS.
-  connect(liveClient_, &LiveClient::publishStateChanged, this, [this](const QString& id, bool pub) {
-    // Toutes les sources du flux, punaisees comprises, pas seulement celle du
-    // poste. 500 ms : le serveur annonce la publication a l'instant ou il
-    // l'accepte, une lecture ouverte trop tot serait encore refusee.
-    if (pub) {
-      const std::string streamId = id.toStdString();
-      QTimer::singleShot(500, this, [streamId]() { kickStalledInstances(streamId); });
-    }
-    if (id == settings_->selectedStreamId()) {
-      const bool wasPublishing = lastPublishing_;
-      lastPublishing_ = pub;
-      if (pub) {
-        maybeFlipToLive();
-      } else if (wasPublishing) {
-        cancelPendingFlipToLive();
-        maybeFlipToBug();
-      }
-    }
-  });
+  connect(liveClient_, &LiveClient::publishStateChanged, this,
+          [this](const QString& id, bool pub) { onPublishState(id, pub, /*synced=*/false); });
+  connect(liveClient_, &LiveClient::publishStateSynced, this,
+          [this](const QString& id, bool pub) { onPublishState(id, pub, /*synced=*/true); });
   // Quality monitor pushes a quality_state event whenever the ingest's
   // bitrate or freeze profile crosses threshold. Treat it the same way as a
   // publish drop so the dock flips to Bug while the publish session is still
@@ -1463,8 +1455,10 @@ void SemirprodDock::bindSignals() {
                  reason.toUtf8().constData(),
                  bitrateKbps);
             if (ok) {
+              flippedToBugForQuality_ = false;
               if (lastPublishing_) maybeFlipToLive();
             } else {
+              flippedToBugForQuality_ = true;
               cancelPendingFlipToLive();
               maybeFlipToBug();
             }
@@ -3296,11 +3290,7 @@ void SemirprodDock::startAuth() {
   authFlow_->start();
 }
 
-void SemirprodDock::disconnectAccount() {
-  // Le poste se retire lui-même côté serveur AVANT l'effacement local : c'est
-  // ce qui permet de reconnecter un AUTRE compte sur ce PC sans que le poste
-  // reste attaché à l'ancien espace. Au mieux, 3 s au plus.
-  const TokenBundle binding = tokenStore_->cached();
+void SemirprodDock::stopSessionWork() {
   // Un renouvellement en vol enregistrerait sa liaison APRES l'effacement :
   // le poste se reconnecterait seul. On l'annule d'abord.
   authFlow_->cancel();
@@ -3310,6 +3300,14 @@ void SemirprodDock::disconnectAccount() {
   if (sessionRetryTimer_) sessionRetryTimer_->stop();
   if (tokenRefreshTimer_) tokenRefreshTimer_->stop();
   liveClient_->disconnectClient();
+}
+
+void SemirprodDock::disconnectAccount() {
+  // Le poste se retire lui-même côté serveur AVANT l'effacement local : c'est
+  // ce qui permet de reconnecter un AUTRE compte sur ce PC sans que le poste
+  // reste attaché à l'ancien espace. Au mieux, 3 s au plus.
+  const TokenBundle binding = tokenStore_->cached();
+  stopSessionWork();
   QPointer<SemirprodDock> self(this);
   authFlow_->release(binding, [self]() {
     if (!self) return;
@@ -3321,6 +3319,12 @@ void SemirprodDock::disconnectAccount() {
 }
 
 void SemirprodDock::clearLocalBinding() {
+  stopPublishRecheck();
+  lastPublishing_ = false;
+  flippedToBugForQuality_ = false;
+  initialDataLoaded_ = false;
+  initialFetchRetryMs_ = 5000;
+  if (initialFetchRetryTimer_) initialFetchRetryTimer_->stop();
   liveClient_->setDeviceId(QString());
   // Liste des sauvegardes et leur provenance (« creee par toi ») : oubliees
   // TOUT DE SUITE, sans attendre le trousseau. Le compte suivant ne doit
@@ -4125,7 +4129,11 @@ void SemirprodDock::refreshStreams() {
         // Replay without the retry hook — if this also 401s, give up and
         // let the watchdog handle it.
         http_->getJson(Config::apiBaseUrl() + QStringLiteral("/api/streams"), fresh,
-            [this](const HttpResponse&, const QJsonDocument& retryJson) {
+            [this](const HttpResponse& retryResponse, const QJsonDocument& retryJson) {
+          if (retryResponse.statusCode != 200) {
+            armInitialFetchRetry();
+            return;
+          }
           applyStreamsResponse(retryJson);
         });
       });
@@ -4137,13 +4145,33 @@ void SemirprodDock::refreshStreams() {
       authFlow_->refresh(tokenStore_->cached());
       return;
     }
+    // Une erreur n'est pas une liste vide : lue comme telle, elle effaçait le flux
+    // choisi et coupait la source en plein direct.
+    if (response.statusCode != 200) {
+      blog(LOG_WARNING, "[semirprod-dock] /api/streams HTTP %d : liste conservee", response.statusCode);
+      // 403 : refus de l'espace, relire ne changera rien.
+      if (response.statusCode == 403) {
+        initialDataLoaded_ = true;
+      } else {
+        armInitialFetchRetry();
+      }
+      return;
+    }
     applyStreamsResponse(json);
   });
 }
 
 void SemirprodDock::applyStreamsResponse(const QJsonDocument& json) {
-    if (!json.isObject()) return;
-    auto array = json.object().value(QStringLiteral("streams")).toArray();
+    const QJsonValue listValue =
+        json.isObject() ? json.object().value(QStringLiteral("streams")) : QJsonValue();
+    if (!listValue.isArray()) {
+      // 200 sans liste, page HTML d'un proxy par exemple.
+      armInitialFetchRetry();
+      return;
+    }
+    initialDataLoaded_ = true;
+    if (initialFetchRetryTimer_) initialFetchRetryTimer_->stop();
+    const QJsonArray array = listValue.toArray();
     streams_.clear();
     QList<StreamEntry> registryEntries;
 
@@ -4613,7 +4641,10 @@ void SemirprodDock::checkStudioAccess() {
     // path, so skip this cycle and re-check on the next tick. Any other
     // transport error: fail-open (keep prior state) so a flaky endpoint never
     // blocks a legitimately entitled streamer.
-    if (response.statusCode != 200 || !json.isObject()) return;
+    if (response.statusCode != 200 || !json.isObject()) {
+      armInitialFetchRetry();
+      return;
+    }
     const auto data = json.object().value(QStringLiteral("data")).toObject();
     const bool access = data.value(QStringLiteral("access")).toBool();
     const bool isPartner = data.value(QStringLiteral("isPartner")).toBool();
@@ -4680,6 +4711,21 @@ void SemirprodDock::armInitialFetchFallback() {
   initialFetchTimer_->start();
 }
 
+void SemirprodDock::armInitialFetchRetry() {
+  if (shuttingDown_ || initialDataLoaded_ || accessToken().isEmpty()) return;
+  if (!initialFetchRetryTimer_) {
+    initialFetchRetryTimer_ = new QTimer(this);
+    initialFetchRetryTimer_->setSingleShot(true);
+    connect(initialFetchRetryTimer_, &QTimer::timeout, this, [this]() {
+      if (shuttingDown_ || initialDataLoaded_ || accessToken().isEmpty()) return;
+      runInitialHttpFetch();
+    });
+  }
+  if (initialFetchRetryTimer_->isActive()) return;
+  initialFetchRetryTimer_->start(initialFetchRetryMs_);
+  initialFetchRetryMs_ = std::min(initialFetchRetryMs_ * 2, 60000);
+}
+
 void SemirprodDock::runInitialHttpFetch() {
   // checkStudioAccess enchaine /api/streams (si acces) et les fonctions.
   checkStudioAccess();
@@ -4730,7 +4776,8 @@ void SemirprodDock::applyRegistrationResult(const QJsonObject& message) {
 
   // Flux : lus seulement avec l'acces, comme le chemin HTTP (applyStudioAccess
   // ne lit /api/streams que si l'acces est ouvert). `null` = l'abonnement ne
-  // couvre pas l'espace, traite comme le 403 de /api/streams (liste vide).
+  // couvre pas l'espace, la liste est vide. Dit explicitement par le serveur,
+  // contrairement a un 403 de /api/streams, qui peut venir d'un proxy.
   if (allowed) {
     const QJsonValue streamsValue = message.value(QStringLiteral("streams"));
     if (streamsValue.isArray()) {
@@ -4738,7 +4785,9 @@ void SemirprodDock::applyRegistrationResult(const QJsonObject& message) {
       wrapped.insert(QStringLiteral("streams"), streamsValue.toArray());
       applyStreamsResponse(QJsonDocument(wrapped));
     } else if (streamsValue.isNull()) {
-      applyStreamsResponse(QJsonDocument(QJsonObject()));
+      QJsonObject noStreams;
+      noStreams.insert(QStringLiteral("streams"), QJsonArray());
+      applyStreamsResponse(QJsonDocument(noStreams));
     } else {
       refreshStreams();
     }
@@ -4752,6 +4801,8 @@ void SemirprodDock::applyStudioAccess(bool access, bool isPartner, const QString
   studioAccessKnown_ = true;
   studioAccess_ = access;
   studioReason_ = reason;
+  // Sans accès, aucune liste ne viendra : il n'y a plus rien à relire.
+  if (!access) initialDataLoaded_ = true;
   blog(LOG_INFO, "[semirprod-dock] studio access=%d reason=%s",
        access ? 1 : 0, reason.toUtf8().constData());
   updateStudioNotice();
@@ -4974,6 +5025,71 @@ void SemirprodDock::reportSourceStateIfChanged(bool force) {
   liveClient_->sendSourceState(id, s.anyReady, s.width, s.height, activeScene, "");
 }
 
+void SemirprodDock::onPublishState(const QString& id, bool pub, bool synced) {
+  // Toutes les sources du flux, punaisees comprises, pas seulement celle du
+  // poste. 500 ms : le serveur annonce la publication a l'instant ou il
+  // l'accepte, une lecture ouverte trop tot serait encore refusee.
+  if (pub) {
+    const std::string streamId = id.toStdString();
+    QTimer::singleShot(500, this, [streamId]() { kickStalledInstances(streamId); });
+  }
+  if (id != settings_->selectedStreamId()) return;
+  stopPublishRecheck();
+  const bool wasPublishing = lastPublishing_;
+
+  if (pub) {
+    lastPublishing_ = true;
+    // Etat relu au retour de la liaison : inchange, il ne s'est rien passe et
+    // l'operateur a pu changer de scene pendant la panne. Seule exception, un
+    // retour a la normale de la qualite qui a pu se perdre pendant la coupure.
+    if (!synced || !wasPublishing || flippedToBugForQuality_) {
+      flippedToBugForQuality_ = false;
+      maybeFlipToLive();
+    }
+    return;
+  }
+
+  flippedToBugForQuality_ = false;
+  if (!wasPublishing) {
+    lastPublishing_ = false;
+    return;
+  }
+  // « Plus de publication » relu peut etre perime. Une source qui recoit encore
+  // des images l'emporte : `lastPublishing_` reste vrai pour qu'une vraie coupure
+  // bascule encore, et on surveille la source au cas ou l'evenement ne vienne pas.
+  if (synced && sceneController_->isSemirprodSourceReadyInScene(settings_->sceneLive())) {
+    publishRecheckStreamId_ = id;
+    if (!publishRecheckTimer_) {
+      publishRecheckTimer_ = new QTimer(this);
+      publishRecheckTimer_->setInterval(15000);
+      connect(publishRecheckTimer_, &QTimer::timeout, this, &SemirprodDock::onPublishRecheck);
+    }
+    publishRecheckTimer_->start();
+    return;
+  }
+  lastPublishing_ = false;
+  cancelPendingFlipToLive();
+  maybeFlipToBug();
+}
+
+void SemirprodDock::onPublishRecheck() {
+  if (shuttingDown_ || accessToken().isEmpty() ||
+      publishRecheckStreamId_ != settings_->selectedStreamId()) {
+    stopPublishRecheck();
+    return;
+  }
+  if (sceneController_->isSemirprodSourceReadyInScene(settings_->sceneLive())) return;
+  stopPublishRecheck();
+  lastPublishing_ = false;
+  cancelPendingFlipToLive();
+  maybeFlipToBug();
+}
+
+void SemirprodDock::stopPublishRecheck() {
+  if (publishRecheckTimer_) publishRecheckTimer_->stop();
+  publishRecheckStreamId_.clear();
+}
+
 void SemirprodDock::maybeFlipToLive() {
   if (!settings_->autoSwitchEnabled() || !lastPublishing_) {
     cancelPendingFlipToLive();
@@ -5055,7 +5171,12 @@ void SemirprodDock::broadcastToWeb() {
   // et ne suit pas un renommage de l'espace.
   state["organizationName"] =
       serverOrgName_.isEmpty() ? tokenStore_->cached().orgName : serverOrgName_;
-  state["authFlowRunning"] = authFlow_->isRunning();
+  // Un renouvellement silencieux n'est pas un appairage : il ne doit pas se lire
+  // « en attente du navigateur » pendant une panne.
+  // Sans JWT, un poste lié attend encore sa première session (kiosque) : l'écran
+  // de connexion ne doit pas s'afficher pendant ce temps.
+  state["authFlowRunning"] =
+      authFlow_->isRunning() && (authFlow_->isPairing() || accessToken().isEmpty());
   state["pluginVersion"] = QStringLiteral(SEMIRPROD_PLUGIN_VERSION);
   // La page doit savoir qu'elle tourne DANS une instance infogeree : le compte
   // n'y est pas celui d'un poste que le client possede, il est pose par

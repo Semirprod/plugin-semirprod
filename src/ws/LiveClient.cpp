@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <functional>
 
+#include <QRandomGenerator>
 #include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -230,6 +231,12 @@ LiveClient::LiveClient(Settings* settings, QObject* parent)
   reconnectTimer_->setSingleShot(true);
   connect(reconnectTimer_, &QTimer::timeout, this, &LiveClient::attemptReconnect);
 
+  targetRetryTimer_ = new QTimer(this);
+  targetRetryTimer_->setSingleShot(true);
+  connect(targetRetryTimer_, &QTimer::timeout, this, [this]() {
+    if (isRegistered() && !registeredStreamId_.isEmpty()) sendSetTarget();
+  });
+
   // Outbound WS ping every 25 s — well under the typical 60 s LB / Cloudflare
   // idle timeout, so the path stays warm and we get a pong to confirm it.
   pingTimer_->setInterval(25000);
@@ -275,8 +282,8 @@ LiveClient::LiveClient(Settings* settings, QObject* parent)
 
   connect(socket_, &WebSocketClient::connected, this, [this]() {
     connected_ = true;
-    reconnectAttempts_ = 0;
-    refreshRequestedThisEpisode_ = false;
+    // Le compteur de reprise n'est remis à zéro qu'à l'enregistrement : un service
+    // qui accepte le socket puis retombe doit garder la reprise exponentielle.
     reconnectTimer_->stop();
     connectWatchdog_->stop();
     blog(LOG_INFO, "[semirprod-ws] connected to %s",
@@ -298,6 +305,7 @@ LiveClient::LiveClient(Settings* settings, QObject* parent)
   });
 
   connect(socket_, &WebSocketClient::disconnected, this, [this]() {
+    clearTargetRetry();
     // Log the close frame the server sent (RFC 6455 codes). 1009 = message
     // too big — that's the one to watch for if preview_frame payloads ever
     // outgrow the server's maxPayload again.
@@ -449,9 +457,6 @@ QList<QSslError> LiveClient::evaluateSslErrors(const QList<QSslError>& errors) {
 
 void LiveClient::connectWithToken(const QString& token) {
   if (halted_) return;
-  // A fresh bearer starts a new stall episode — re-arm the refresh request so
-  // that if this token is also refused later we can ask for another refresh.
-  if (token != token_) refreshRequestedThisEpisode_ = false;
   token_ = token;
   if (token_.isEmpty()) {
     disconnectClient();
@@ -479,7 +484,10 @@ void LiveClient::connectWithToken(const QString& token) {
     return;
   }
 
-  cancelReconnect();
+  // Pas cancelReconnect() : un jeton neuf ne remet pas la reprise à zéro. Pendant
+  // une panne du seul service live, l'authentification répond, et chaque
+  // renouvellement relançait un cycle à une seconde.
+  reconnectTimer_->stop();
   QNetworkRequest request{target};
   request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(token_).toUtf8());
   request.setRawHeader("User-Agent",
@@ -498,6 +506,9 @@ void LiveClient::connectWithToken(const QString& token) {
 
 void LiveClient::disconnectClient() {
   token_.clear();
+  clearTargetRetry();
+  targetJustChosen_ = false;
+  refreshRequestedThisEpisode_ = false;
   registered_ = false;
   restartRetryMs_ = -1;
   registeredStreamId_.clear();
@@ -549,7 +560,8 @@ void LiveClient::scheduleReconnect() {
   // Redémarrage annoncé du pont : on revient tout de suite sur le pod suivant,
   // sans reprise exponentielle ni compteur d'échecs.
   if (restartRetryMs_ >= 0) {
-    const int delay = restartRetryMs_;
+    // Dispersion : tout le parc reçoit cette annonce au même instant.
+    const int delay = restartRetryMs_ + QRandomGenerator::global()->bounded(2001);
     restartRetryMs_ = -1;
     blog(LOG_INFO, "[semirprod-ws] redemarrage du serveur annonce : reconnexion dans %d ms", delay);
     reconnectTimer_->start(delay);
@@ -559,7 +571,9 @@ void LiveClient::scheduleReconnect() {
   const int capMs = 30000;
   const int baseMs = 1000;
   const int shift = std::min(reconnectAttempts_, 5); // 2^5 = 32 → clamp by capMs
-  const int delayMs = std::min(capMs, baseMs << shift);
+  const int backoffMs = std::min(capMs, baseMs << shift);
+  // Jusqu'à 20 % de plus, pour que le parc ne revienne pas d'un seul bloc.
+  const int delayMs = backoffMs + QRandomGenerator::global()->bounded(backoffMs / 5 + 1);
   blog(LOG_INFO, "[semirprod-ws] scheduling reconnect in %d ms (attempt %d)",
        delayMs, reconnectAttempts_ + 1);
   reconnectTimer_->start(delayMs);
@@ -573,9 +587,9 @@ void LiveClient::attemptReconnect() {
   // is the problem (expired mid-session / rejected by the server) and ask the
   // dock to refresh it before we keep hammering the dead credential. Fire once
   // per episode so we don't spam the auth server on every backoff tick — the
-  // dock's refresh will call connectWithToken() with the new bearer, which
-  // resets reconnectAttempts_ and this flag on success. If the refresh fails,
-  // the normal backoff loop below stays as the fallback.
+  // dock's refresh will call connectWithToken() with the new bearer. The counter
+  // and this flag only reset once the server accepts the station. If the refresh
+  // fails, the normal backoff loop below stays as the fallback.
   constexpr int kRefreshAfterAttempts = 2;
   // Tant que l'episode dure, la demande est renouvelee toutes les 10
   // tentatives (~5 min au plafond de 30 s) : c'est ce que faisait le chien de
@@ -630,9 +644,25 @@ void LiveClient::registerStream(const QString& streamId, const QString& sceneLiv
   sceneBug_ = sceneBug;
   const bool changed = streamId != registeredStreamId_;
   registeredStreamId_ = streamId;
+  if (changed) {
+    clearTargetRetry();
+    targetJustChosen_ = true;
+  }
   // Enregistré : on change la cible SUR le socket. Sinon, la réponse à
   // `register_instance` la réconciliera (voir `register_instance_result`).
   if (changed && isRegistered()) sendSetTarget();
+}
+
+void LiveClient::armTargetRetry() {
+  if (registeredStreamId_.isEmpty() || targetRetryTimer_->isActive()) return;
+  targetRetryTimer_->start(targetRetryDelayMs_ +
+                           QRandomGenerator::global()->bounded(targetRetryDelayMs_ / 5 + 1));
+  targetRetryDelayMs_ = std::min(targetRetryDelayMs_ * 2, 120000);
+}
+
+void LiveClient::clearTargetRetry() {
+  targetRetryTimer_->stop();
+  targetRetryDelayMs_ = 5000;
 }
 
 void LiveClient::sendSetTarget() {
@@ -1254,9 +1284,14 @@ void LiveClient::handleTextMessage(const QString& text) {
     if (!accepted) {
       blog(LOG_WARNING, "[semirprod-ws] poste NON enregistre (%s)",
            obj.value(QStringLiteral("error")).toString().toUtf8().constData());
+      // Le serveur garde le socket ouvert sans poste enregistré : rien ne
+      // relancerait l'annonce. On ferme, et la reprise exponentielle repart.
+      QTimer::singleShot(0, this, [this]() { socket_->close(); });
       return;
     }
     registered_ = true;
+    reconnectAttempts_ = 0;
+    refreshRequestedThisEpisode_ = false;
     // Nouvelle session cote pont : il ne connait plus rien de l'etat du poste.
     // Les empreintes sont oubliees pour que le prochain envoi soit complet.
     stateFingerprints_.clear();
@@ -1272,9 +1307,11 @@ void LiveClient::handleTextMessage(const QString& text) {
       sendSetTarget();
       return;
     }
+    clearTargetRetry();
+    targetJustChosen_ = false;
     if (!serverTarget.isEmpty()) {
       emit streamRegistered(serverTarget, true);
-      emit publishStateChanged(serverTarget, target.value(QStringLiteral("publishing")).toBool());
+      emit publishStateSynced(serverTarget, target.value(QStringLiteral("publishing")).toBool());
     }
     return;
   }
@@ -1283,14 +1320,23 @@ void LiveClient::handleTextMessage(const QString& text) {
     const bool ok = obj.value(QStringLiteral("status")).toString() == QStringLiteral("ok");
     const QString streamId = obj.value(QStringLiteral("streamId")).toString();
     if (ok) {
+      clearTargetRetry();
+      const bool justChosen = targetJustChosen_;
+      targetJustChosen_ = false;
       if (!streamId.isEmpty()) {
         emit streamRegistered(streamId, true);
-        emit publishStateChanged(streamId, obj.value(QStringLiteral("publishing")).toBool());
+        const bool publishing = obj.value(QStringLiteral("publishing")).toBool();
+        if (justChosen) {
+          emit publishStateChanged(streamId, publishing);
+        } else {
+          emit publishStateSynced(streamId, publishing);
+        }
       }
       emit statusMessage(streamId.isEmpty()
                              ? QStringLiteral("Aucun flux visé.")
                              : QStringLiteral("Flux live enregistré côté Semirprod."));
     } else {
+      armTargetRetry();
       emit streamRegistered(registeredStreamId_, false);
       emit statusMessage(QStringLiteral("Ce flux n'existe plus dans ton espace Semirprod. Choisis un flux."));
     }

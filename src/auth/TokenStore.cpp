@@ -946,7 +946,16 @@ void TokenStore::save(const TokenBundle& bundle, SimpleCallback cb) {
   // fallback content to write either.
   cached_ = bundle;
   emit tokenChanged();
+  persist(bundle, std::move(cb));
+}
 
+void TokenStore::saveRotated(const TokenBundle& bundle) {
+  // Pas de tokenChanged : le JWT n'a pas changé, personne n'a à se reconnecter.
+  cached_ = bundle;
+  persist(bundle, {});
+}
+
+void TokenStore::persist(const TokenBundle& bundle, SimpleCallback cb) {
   auto wrappedCb = [bundle, cb = std::move(cb)](bool ok) {
     if (!ok) {
       blog(LOG_WARNING,

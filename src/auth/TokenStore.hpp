@@ -78,6 +78,14 @@ public:
 
   void load(LoadCallback cb);
   void save(const TokenBundle& bundle, SimpleCallback cb);
+
+  /**
+   * Enregistre un jeton de rafraîchissement qui vient de tourner, AVANT l'échange
+   * de session. Le serveur a déjà révoqué l'ancien : si cet échange échoue et que
+   * le plugin rejoue l'ancien jeton, le serveur y voit un vol et supprime tous les
+   * jetons du compte, ceux de ses autres postes compris.
+   */
+  void saveRotated(const TokenBundle& bundle);
   void clear(SimpleCallback cb);
 
   // Synchronous cached access — only valid after a successful load().
@@ -150,6 +158,7 @@ private:
   void runOnSecretThread(std::function<void()> job);
   static QString loggedOutMarkerPath();
 
+  void persist(const TokenBundle& bundle, SimpleCallback cb);
   void loadFromFile(LoadCallback cb);
   void saveToFile(const TokenBundle& bundle, SimpleCallback cb);
   void clearFile(SimpleCallback cb);

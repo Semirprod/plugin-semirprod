@@ -498,7 +498,7 @@ export function CollectionsPanel({
         {etatImport}
 
         {groupes.length === 0 ? (
-          <Empty>{t('collections.noBackups')}</Empty>
+          <Empty>{t(quotaKnown ? 'collections.noBackups' : 'collections.backupsUnavailable')}</Empty>
         ) : (
           groupes.map(({ latest: item, count }) => (
             <NavRow

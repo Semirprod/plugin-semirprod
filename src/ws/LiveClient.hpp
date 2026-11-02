@@ -246,6 +246,9 @@ signals:
       that the stream is already publishing, since the transition event itself
       was emitted long before this socket existed. */
   void publishStateChanged(const QString& streamId, bool publishing);
+  /** État relu à l'enregistrement ou au changement de cible : ce n'est pas un
+      événement survenu à l'instant, et il peut être périmé. */
+  void publishStateSynced(const QString& streamId, bool publishing);
   /** Fires when the backend quality monitor crosses the bitrate / freeze
       threshold for the registered stream. ok=true means the ingest is healthy
       again; ok=false means the ingest is degraded and the dock should swap to
@@ -492,6 +495,14 @@ private:
   Settings* settings_ = nullptr;
   WebSocketClient* socket_;
   QTimer* reconnectTimer_ = nullptr;
+  // Cible refusée (flux supprimé, ou dashboard en panne : le serveur ne distingue
+  // pas les deux) : sans nouvel essai, le poste restait sans cible jusqu'à la
+  // prochaine reconnexion.
+  QTimer* targetRetryTimer_ = nullptr;
+  int targetRetryDelayMs_ = 5000;
+  // Le poste vient de choisir ce flux. Sa réponse est alors un vrai changement,
+  // pas la relecture d'un état déjà connu.
+  bool targetJustChosen_ = false;
   // Sends ws-level pings while connected so a silently-dead TCP (NAT / LB
   // idle drop) is detected instead of sitting half-open until the next OS
   // keepalive (which on Windows defaults to ~2h).
@@ -507,7 +518,7 @@ private:
   int reconnectAttempts_ = 0;
   // Set once we've asked the dock to refresh the token for the current stall
   // episode, so we don't fire reconnectStalled() on every backoff tick. Reset
-  // to false on a successful connect.
+  // to false once the server accepts the station.
   bool refreshRequestedThisEpisode_ = false;
   bool connected_ = false;
   QString token_;
@@ -525,6 +536,8 @@ private:
   // exponentielle, après ce délai.
   int restartRetryMs_ = -1;
   void sendSetTarget();
+  void armTargetRetry();
+  void clearTargetRetry();
   QString sceneLive_;
   QString sceneBug_;
 

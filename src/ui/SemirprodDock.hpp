@@ -104,6 +104,11 @@ public:
   /// interactif tourne.
   void onExternalTokenStored();
   void disconnectAccount();
+  void stopSessionWork();
+  void onPublishState(const QString& id, bool pub, bool synced);
+  void armInitialFetchRetry();
+  void onPublishRecheck();
+  void stopPublishRecheck();
   // Efface la liaison locale (trousseau, client live) sans rien demander au
   // serveur : suite d'un retrait, ou d'un refus definitif du poste.
   void clearLocalBinding();
@@ -617,6 +622,11 @@ private:
   // de `register_instance_result`. Remplace le double appel « loadToken puis
   // connexion WS » a moins de 10 s d'intervalle.
   QTimer* initialFetchTimer_ = nullptr;
+  // Rien n'a encore été lu dans cette session : sans ces essais, un OBS lancé
+  // pendant une panne restait sans flux une fois le serveur revenu.
+  QTimer* initialFetchRetryTimer_ = nullptr;
+  int initialFetchRetryMs_ = 5000;
+  bool initialDataLoaded_ = false;
   // Nom de l'espace pousse par le serveur (instantane, `org_renamed`). Prime
   // sur celui du jeton, fige a l'appairage.
   QString serverOrgName_;
@@ -648,6 +658,13 @@ private:
   QString lastSourceStateActiveScene_;
   QString lastSourceStateSourceScene_;
   bool lastPublishing_ = false;
+  // La scène Bug vient d'une dégradation : le retour à la normale peut avoir eu
+  // lieu pendant une coupure de la liaison, et cet événement est alors perdu.
+  bool flippedToBugForQuality_ = false;
+  // « Plus de publication » relu au retour de la liaison, source encore vivante :
+  // on surveille la source au lieu de croire un état peut-être périmé.
+  QTimer* publishRecheckTimer_ = nullptr;
+  QString publishRecheckStreamId_;
   // Latches the "incoming feed above 1080p" operator notice so the 200 ms
   // source-panel poll surfaces it once, not every tick. Cleared when the feed
   // is no longer oversize so a later oversize stream notifies again.
