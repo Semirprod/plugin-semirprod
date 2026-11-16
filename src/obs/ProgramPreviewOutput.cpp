@@ -503,6 +503,28 @@ bool ProgramPreviewOutput::buildAndStart(const char* vencId, bool isX264,
     obs_data_set_string(vsettings, "preset2", "p1");
     obs_data_set_string(vsettings, "preset", "speed");
     obs_data_set_string(vsettings, "target_usage", "TU7");
+    // Latence d'encodage minimale. Les défauts d'obs-nvenc (tune « hq »,
+    // lookahead, double passe « qres ») retiennent des images avant de les
+    // sortir : pour un retour de régie, chaque image retenue est un retard
+    // visible. « ull » = ultra low latency ; sans lookahead ni double passe,
+    // l'encodeur rend chaque image dès qu'elle est codée. « latency » est la
+    // clé équivalente d'obs-qsv11. Clés ignorées par les encodeurs qui ne les
+    // connaissent pas (voir plus haut).
+    obs_data_set_string(vsettings, "tune", "ull");
+    obs_data_set_bool(vsettings, "lookahead", false);
+    obs_data_set_string(vsettings, "multipass", "disabled");
+    obs_data_set_string(vsettings, "latency", "ultra-low");
+    // AMD : obs-amf n'a ni « tune » ni « lookahead ». Il pose de lui-même
+    // l'usage TRANSCODING, la faible latence coupée et la pré-analyse active
+    // (texture-amf.cpp, init AVC), et ne les laisse changer que par sa ligne
+    // d'options libres, relue juste avant l'initialisation de l'encodeur
+    // (texture-amf-opts.hpp : « usage », « preanalysis »). Posée pour AMF
+    // seulement : la même clé existe sur les encodeurs ffmpeg hérités, qui ne
+    // connaissent pas ces options.
+    if (std::strcmp(vencId, "h264_texture_amf") == 0) {
+      obs_data_set_string(vsettings, "ffmpeg_opts",
+                          "usage=ultralowlatency preanalysis=false");
+    }
   }
 
   videoEncoder_ =
