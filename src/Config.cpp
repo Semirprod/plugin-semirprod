@@ -62,6 +62,14 @@ constexpr ProductionHost kProductionHosts[] = {
     // (LIVE_WEBRTC_BASE_URL cote serveur) : il doit rester autorise pour WHIP.
     {"live-ws.semirprod.fr", true, false},   // WebSocket du poste + WHIP
     {"live.semirprod.fr", true, false},      // ingest / WHIP
+    // Migration semirprod.fr -> semirprod.com (0.2.9) : le plugin vise le .com,
+    // et accepte encore le .fr que le serveur renvoie tant que la plateforme
+    // n'a pas fini sa bascule (URL WHIP, page d'appairage, téléchargements).
+    {"semirprod.com", false, false},
+    {"app.semirprod.com", false, true},
+    {"auth.semirprod.com", false, false},
+    {"live-ws.semirprod.com", true, false},
+    {"live.semirprod.com", true, false},
 };
 
 // Adresse effective : politique de l'edition (voir Edition.hpp). Public :
@@ -196,6 +204,8 @@ bool Config::isKnownOverlayHost(const QString& host) {
   static const QStringList kSemirprodOverlayHosts = {
       QStringLiteral("semirprod.fr"), QStringLiteral("www.semirprod.fr"),
       QStringLiteral("app.semirprod.fr"),
+      QStringLiteral("semirprod.com"), QStringLiteral("www.semirprod.com"),
+      QStringLiteral("app.semirprod.com"),
   };
   if (host.isEmpty()) return false;
   if (kSemirprodOverlayHosts.contains(host)) return true;

@@ -24,14 +24,14 @@ namespace semirprod {
 
 struct Config {
   // Production endpoints — change here, rebuild, ship. No runtime override.
-  static constexpr const char* kProdApiBase     = "https://app.semirprod.fr";
-  static constexpr const char* kProdAuthBase    = "https://auth.semirprod.fr";
-  static constexpr const char* kProdLiveWs      = "wss://live-ws.semirprod.fr/v2";
-  static constexpr const char* kProdUpdateUrl   = "https://app.semirprod.fr/api/plugin/latest";
+  static constexpr const char* kProdApiBase     = "https://app.semirprod.com";
+  static constexpr const char* kProdAuthBase    = "https://auth.semirprod.com";
+  static constexpr const char* kProdLiveWs      = "wss://live-ws.semirprod.com/v2";
+  static constexpr const char* kProdUpdateUrl   = "https://app.semirprod.com/api/plugin/latest";
   // Site vitrine : c'est là que se souscrit l'abonnement Studio. Distinct du
   // tableau de bord (app.) — un compte sans abonnement n'a rien à y faire, on
   // l'envoie sur l'offre.
-  static constexpr const char* kProdSiteBase    = "https://semirprod.fr";
+  static constexpr const char* kProdSiteBase    = "https://semirprod.com";
 
   // Client identity — registered OAuth application on auth.semirprod.fr.
   // Changing this without re-registering on the auth server will brick login.
