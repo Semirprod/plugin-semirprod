@@ -59,6 +59,13 @@ bool isAllowedRemoteHost(const QString& h) {
       QStringLiteral("auth.semirprod.fr"),
       QStringLiteral("live-ws.semirprod.fr"),
       QStringLiteral("live.semirprod.fr"),
+      // Migration semirprod.fr -> semirprod.com (0.2.9) : mêmes cinq hôtes
+      // sous le nouveau domaine, hôtes EXACTS comme les autres.
+      QStringLiteral("semirprod.com"),
+      QStringLiteral("app.semirprod.com"),
+      QStringLiteral("auth.semirprod.com"),
+      QStringLiteral("live-ws.semirprod.com"),
+      QStringLiteral("live.semirprod.com"),
   };
   if (kAllowedHosts.contains(h)) return true;
 
