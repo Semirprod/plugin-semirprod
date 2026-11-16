@@ -108,6 +108,14 @@ FINAL="$DIST_DIR/semirprod-plugin-$VERSION.pkg"
 # --- Composant ---
 #
 # `--install-location` est relative au domaine choisi par le distribution.xml.
+# Un CR colle au shebang donne "/bin/bash<CR>: No such file or directory" et
+# Installer abandonne (PKInstallErrorDomain 112). On refuse de construire.
+for script in "$HERE"/scripts/*; do
+  if ! tr -d '\r' < "$script" | cmp -s - "$script"; then
+    die "fins de ligne CRLF dans $(basename "$script") : convertir en LF."
+  fi
+done
+
 PKGBUILD_ARGS=(
   --root "$STAGING/payload"
   --identifier "$IDENTIFIER"

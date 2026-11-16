@@ -6,6 +6,8 @@
 # Shell scripts and YAML: LF everywhere, including a Windows checkout. A CR
 # glued to a shebang gives "bad interpreter: no such file or directory".
 *.sh text eol=lf
+# macOS .pkg scripts have no extension: the *.sh rule does not cover them.
+packaging/macos/scripts/* text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 
